@@ -104,6 +104,50 @@ def test_quantize_clips_out_of_range_values(precision: str) -> None:
     np.testing.assert_array_equal(result, expected)
 
 
+@pytest.mark.parametrize("precision", ["int8", "uint8"])
+@pytest.mark.parametrize("bound", [1e-6, 60000.0])
+@pytest.mark.parametrize("calibration_mode", ["inferred", "ranges", "embeddings"])
+def test_scalar_quantize_float16_uses_float32_arithmetic(precision: str, bound: float, calibration_mode: str) -> None:
+    """A nonconstant fp16 range must not collapse after bucket-step underflow or overflow."""
+    embeddings = np.array([[-bound, 3], [0, 3], [bound, 3]], dtype=np.float16)
+    calibration = embeddings[[0, 2]]
+    kwargs = {}
+    reference_kwargs = {}
+    if calibration_mode == "ranges":
+        kwargs["ranges"] = calibration
+        reference_kwargs["ranges"] = calibration.astype(np.float32)
+    elif calibration_mode == "embeddings":
+        kwargs["calibration_embeddings"] = calibration
+        reference_kwargs["calibration_embeddings"] = calibration.astype(np.float32)
+
+    expected = quantize_embeddings(embeddings.astype(np.float32), precision, **reference_kwargs)
+    with np.errstate(over="raise", invalid="raise", divide="raise"):
+        actual = quantize_embeddings(embeddings, precision, **kwargs)
+
+    np.testing.assert_array_equal(actual, expected)
+    assert len(np.unique(actual[:, 0])) == 3
+
+
+@pytest.mark.parametrize("precision", ["int8", "uint8"])
+def test_scalar_quantize_float16_multi_vector_shared_ranges(precision: str) -> None:
+    embeddings = np.array([[-1e-6, 3], [0, 3], [1e-6, 3]], dtype=np.float16)
+    matrices = [embeddings[:1], embeddings[1:]]
+    expected = quantize_embeddings([matrix.astype(np.float32) for matrix in matrices], precision)
+    actual = quantize_embeddings(matrices, precision)
+    for actual_matrix, expected_matrix in zip(actual, expected):
+        np.testing.assert_array_equal(actual_matrix, expected_matrix)
+
+
+@pytest.mark.parametrize("precision", ["int8", "uint8"])
+@pytest.mark.parametrize("bound", [1e-6, 60000.0])
+def test_scalar_quantize_float16_tensor(precision: str, bound: float) -> None:
+    embeddings = torch.tensor([[-bound], [0], [bound]], dtype=torch.float16)
+    expected = quantize_embeddings(embeddings.numpy().astype(np.float32), precision)
+    with np.errstate(over="raise", invalid="raise", divide="raise"):
+        actual = quantize_embeddings(embeddings, precision)
+    np.testing.assert_array_equal(actual, expected)
+
+
 def test_quantize_multi_vector_handles_empty_matrices() -> None:
     """A (0, dim) matrix (e.g. a fully-masked multi-vector document) must quantize to the
     correctly-shaped empty output instead of crashing packbits / calibration."""
