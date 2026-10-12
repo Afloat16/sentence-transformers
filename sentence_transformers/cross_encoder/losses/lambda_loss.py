@@ -229,6 +229,8 @@ class LambdaLoss(nn.Module):
         Args:
             inputs: List of (queries, documents_list)
             labels: Ground truth relevance scores, shape (batch_size, num_documents)
+            prompt: Optional prompt passed to the model's preprocessing of the (query, document) pairs.
+            task: Optional task passed to the model's preprocessing of the (query, document) pairs.
 
         Returns:
             Tensor: LambdaLoss loss over the batch
@@ -324,7 +326,7 @@ class LambdaLoss(nn.Module):
 
         # Apply masks and reduction
         masked_losses = losses[padded_pairs_mask & ndcg_at_k_mask]
-        loss = -torch.mean(masked_losses)
+        loss = -masked_losses.sum() / max(masked_losses.numel(), 1)
         return loss
 
     def get_config_dict(self) -> dict[str, float | int | str | None]:

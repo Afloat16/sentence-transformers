@@ -145,8 +145,9 @@ class BaseModel(nn.Sequential, PeftAdapterMixin, ABC):
                 a commit id, for a stored model on Hugging Face. Defaults to None.
             local_files_only (bool, optional): Whether to only look at local files (i.e., do not try to download
                 the model). Defaults to False.
-            token (bool or str, optional): Hugging Face authentication token to download private models.
-                Defaults to None.
+            token (bool or str, optional): Hugging Face authentication token for higher Hub rate limits and access to
+                private or gated models your account can read. Defaults to None, which uses ``HF_TOKEN`` or
+                credentials saved with ``hf auth login``, if available.
             model_kwargs (dict[str, Any], optional): Keyword arguments passed to the underlying Hugging Face
                 Transformers model via ``AutoModel.from_pretrained``. Particularly useful options include:
 
@@ -347,8 +348,8 @@ class BaseModel(nn.Sequential, PeftAdapterMixin, ABC):
         if self.default_prompt_name:
             logger.warning_once(
                 f"Default prompt name is set to '{self.default_prompt_name}'. "
-                f"This prompt will be applied to all inference calls, except if "
-                f"a `prompt` or `prompt_name` parameter is provided."
+                "This prompt applies unless overridden by `prompt`, `prompt_name`, or a method-specific prompt, "
+                "including an empty prompt."
             )
 
     def _resolve_prompt(self, prompt: str | None, prompt_name: str | None) -> str | None:
@@ -881,6 +882,8 @@ class BaseModel(nn.Sequential, PeftAdapterMixin, ABC):
 
         Args:
             repo_id (str): Repository name for your model in the Hub, including the user or organization.
+            organization (str, optional): DEPRECATED, include the organization in ``repo_id`` instead
+                (e.g. ``"organization/repo_id"``).
             token (str, optional): An authentication token (See https://huggingface.co/settings/token)
             private (bool, optional): Set to true, for hosting a private model
             safe_serialization (bool, optional): If true, save the model using safetensors. If false, save the model the traditional PyTorch way
