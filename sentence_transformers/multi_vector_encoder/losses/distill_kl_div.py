@@ -144,7 +144,6 @@ class MultiVectorDistillKLDivLoss(nn.Module):
         sentence_features: Iterable[dict[str, Tensor]],
         labels: Tensor,
     ) -> Tensor:
-        # MultiVectorMask replaces encoder masks with scoring masks; keep those writes local to this loss.
         sentence_features = [dict(features) for features in sentence_features]
         if len(sentence_features) < 3:
             raise ValueError(
