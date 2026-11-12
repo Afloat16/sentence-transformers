@@ -184,7 +184,7 @@ class ParallelSentencesDataset(Dataset):
 
         # Use caching
         new_sentences = []
-        for sent in sentences:
+        for sent in dict.fromkeys(sentences):
             if sent not in self.embedding_cache:
                 new_sentences.append(sent)
 
