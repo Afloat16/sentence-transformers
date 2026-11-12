@@ -50,7 +50,10 @@ class FlopsLoss(nn.Module):
             mask = (l0_norm > self.threshold).float()
             embeddings = embeddings * mask.unsqueeze(1)
 
-        return torch.sum(torch.mean(embeddings, dim=0) ** 2)
+        # Accumulate in float32 before squaring and summing over the vocabulary. The
+        # unweighted regularizer can exceed float16's range even for finite embeddings.
+        dtype = torch.float32 if embeddings.dtype in (torch.float16, torch.bfloat16) else embeddings.dtype
+        return torch.sum(torch.mean(embeddings, dim=0, dtype=dtype) ** 2)
 
     def get_config_dict(self) -> dict:
         return {"threshold": self.threshold}
