@@ -15,6 +15,7 @@ from torch import Tensor, nn
 
 from sentence_transformers.base.modules.module import Module
 from sentence_transformers.util import fullname, import_from_string
+from sentence_transformers.util.misc import _get_activation_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +103,8 @@ class Dense(Module):
     def get_config_dict(self):
         config = super().get_config_dict()
         config["activation_function"] = fullname(self.activation_function)
+        if activation_kwargs := _get_activation_kwargs(self.activation_function):
+            config["activation_function_kwargs"] = activation_kwargs
         for key, default in self._DEFAULT_CONFIG_VALUES.items():
             if config.get(key) == default:
                 config.pop(key, None)
@@ -139,6 +142,7 @@ class Dense(Module):
             "local_files_only": local_files_only,
         }
         config = cls.load_config(model_name_or_path=model_name_or_path, **hub_kwargs)
+        activation_kwargs = config.pop("activation_function_kwargs", {})
         if "activation_function" in config:
             if trust_remote_code or config["activation_function"].startswith("torch."):
                 activation_class = import_from_string(config["activation_function"])
@@ -149,7 +153,7 @@ class Dense(Module):
                         f"Activation function {config['activation_function']!r} must be a torch.nn.Module class "
                         "when trust_remote_code=False."
                     )
-                config["activation_function"] = activation_class()
+                config["activation_function"] = activation_class(**activation_kwargs)
             else:
                 logger.warning(
                     f"Activation function path '{config['activation_function']}' is not trusted, "

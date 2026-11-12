@@ -28,7 +28,7 @@ from sentence_transformers.util.decorators import (
     cross_encoder_init_args_decorator,
     cross_encoder_predict_rank_args_decorator,
 )
-from sentence_transformers.util.misc import _to_list
+from sentence_transformers.util.misc import _get_activation_kwargs, _to_list
 
 if TYPE_CHECKING:
     from transformers import KernelConfig
@@ -357,10 +357,20 @@ class CrossEncoder(BaseModel, FitMixin):
         )
         return [transformer_model], {}
 
-    def _resolve_activation_fn(self, activation_fn_path: str) -> Callable | None:
+    def _resolve_activation_fn(
+        self, activation_fn_path: str, activation_kwargs: dict[str, Any] | None = None
+    ) -> Callable | None:
         """Instantiate an activation function from a dotted path string, respecting trust_remote_code."""
         if self.trust_remote_code or activation_fn_path.startswith("torch."):
-            return import_from_string(activation_fn_path)()
+            activation_class = import_from_string(activation_fn_path)
+            if not self.trust_remote_code and not (
+                inspect.isclass(activation_class) and issubclass(activation_class, nn.Module)
+            ):
+                raise ValueError(
+                    f"Activation function {activation_fn_path!r} must be a torch.nn.Module class "
+                    "when trust_remote_code=False."
+                )
+            return activation_class(**(activation_kwargs or {}))
         logger.warning(
             f"Activation function path '{activation_fn_path}' is not trusted, using default activation function instead. "
             "Please load the CrossEncoder with `trust_remote_code=True` to allow loading custom activation "
@@ -370,9 +380,11 @@ class CrossEncoder(BaseModel, FitMixin):
 
     def get_default_activation_fn(self) -> Callable:
         activation_fn_path = None
+        activation_kwargs = None
         config = self.config
         if hasattr(config, "sentence_transformers") and "activation_fn" in config.sentence_transformers:
             activation_fn_path = config.sentence_transformers["activation_fn"]
+            activation_kwargs = config.sentence_transformers.get("activation_fn_kwargs")
 
         # Backwards compatibility with <v4.0: we stored the activation_fn under 'sbert_ce_default_activation_function'
         elif (
@@ -383,7 +395,7 @@ class CrossEncoder(BaseModel, FitMixin):
             del config.sbert_ce_default_activation_function
 
         if activation_fn_path is not None:
-            resolved = self._resolve_activation_fn(activation_fn_path)
+            resolved = self._resolve_activation_fn(activation_fn_path, activation_kwargs)
             if resolved is not None:
                 return resolved
 
@@ -872,6 +884,8 @@ class CrossEncoder(BaseModel, FitMixin):
         config = super()._get_model_config() | {
             "activation_fn": fullname(self.activation_fn),
         }
+        if activation_kwargs := _get_activation_kwargs(self.activation_fn):
+            config["activation_fn_kwargs"] = activation_kwargs
         if self.keep_in_fp32_modules:
             config["keep_in_fp32_modules"] = self.keep_in_fp32_modules
         return config
@@ -883,7 +897,7 @@ class CrossEncoder(BaseModel, FitMixin):
         if self.activation_fn is None and "activation_fn" in model_config:
             activation_fn_path = model_config["activation_fn"]
             if activation_fn_path is not None:
-                resolved = self._resolve_activation_fn(activation_fn_path)
+                resolved = self._resolve_activation_fn(activation_fn_path, model_config.get("activation_fn_kwargs"))
                 if resolved is not None:
                     self.activation_fn = resolved
 

@@ -8,7 +8,7 @@ import os
 import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
-from inspect import isclass
+from inspect import Parameter, isclass, signature
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -56,6 +56,26 @@ def fullname(obj) -> str:
     if module is None or module == str.__class__.__module__:
         return obj.__name__  # Avoid reporting __builtin__
     return module + "." + obj.__name__
+
+
+def _get_activation_kwargs(activation: Callable) -> dict[str, Any]:
+    """Keep non-default scalar constructor options declared as constants by nn.Module activations."""
+    constants = getattr(activation, "__constants__", ())
+    if not constants:
+        return {}
+    try:
+        parameters = signature(type(activation)).parameters
+    except (TypeError, ValueError):
+        return {}
+    kwargs = {}
+    for key in constants:
+        parameter = parameters.get(key)
+        if parameter is None or parameter.kind not in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY):
+            continue
+        value = getattr(activation, key)
+        if (value is None or isinstance(value, (bool, int, float, str))) and value != parameter.default:
+            kwargs[key] = value
+    return kwargs
 
 
 def similarity_fct_name(similarity_fct: Callable) -> str:
