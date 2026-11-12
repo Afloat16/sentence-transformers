@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 
 from sentence_transformers.base.modules import Module
+from sentence_transformers.util.tensor import _convert_to_float_tensor
 
 
 class LogitScore(Module):
@@ -48,7 +49,11 @@ class LogitScore(Module):
         if self.false_token_id is None:
             scores = logits[:, self.true_token_id]
         else:
-            scores = logits[:, self.true_token_id] - logits[:, self.false_token_id]
+            # Upcast only the selected logits before subtraction to avoid rounding distinct
+            # log-odds to the same score when the language model runs in fp16 or bfloat16.
+            scores = _convert_to_float_tensor(logits[:, self.true_token_id]) - _convert_to_float_tensor(
+                logits[:, self.false_token_id]
+            )
 
         features["scores"] = scores.unsqueeze(1)
         return features
