@@ -1215,15 +1215,12 @@ class SparseEncoder(BaseModel):
                 "sparsity_ratio": 1.0,
             }
 
-        # CSR gives O(1) per-row non-zero counts via crow_indices, and fall back to CPU for MPS.
+        # Inspect stored values, which may include explicit zeros, and fall back to CPU for MPS.
         try:
             embeddings = embeddings.to_sparse_csr()
         except NotImplementedError:
             embeddings = embeddings.cpu().to_sparse_csr()
-        crow_indices = embeddings.crow_indices()
-        non_zero_per_row = crow_indices[1:] - crow_indices[:-1]
-
-        mean_active_dims = torch.mean(non_zero_per_row.float()).item()
+        mean_active_dims = torch.count_nonzero(embeddings.values()).item() / num_rows
         mean_sparsity_ratio = 1.0 - (mean_active_dims / num_cols)
 
         return {
