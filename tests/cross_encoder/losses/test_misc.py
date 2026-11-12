@@ -117,6 +117,27 @@ class _ScoreModel(CrossEncoder):
         return {"scores": scores.unsqueeze(-1) if scores.ndim == 1 else scores}
 
 
+@pytest.mark.parametrize("loss_cls", LISTWISE_LOSSES)
+@pytest.mark.parametrize("mini_batch_size", [None, 0, -1, 2, 20])
+def test_listwise_full_batch_setting_preserves_values_and_gradients(loss_cls, mini_batch_size):
+    scores = torch.tensor([0.3, -0.2, 0.1, 0.7, -0.1])
+    inputs = (["first query", "second query"], [["0", "1"], ["2", "3", "4"]])
+    labels = [torch.tensor([1.0, 0.0]), torch.tensor([2.0, 1.0, 0.0])]
+    reference_model = _ScoreModel(scores.clone())
+    reference_loss = loss_cls(reference_model, mini_batch_size=1)(inputs, labels)
+    reference_loss.backward()
+
+    model = _ScoreModel(scores.clone())
+    batch_sizes = []
+    model.register_forward_pre_hook(lambda _module, args: batch_sizes.append(len(args[0]["indices"])))
+    loss = loss_cls(model, mini_batch_size=mini_batch_size)(inputs, labels)
+    loss.backward()
+
+    assert batch_sizes == ([2, 2, 1] if mini_batch_size in (None, 2) else [5])
+    torch.testing.assert_close(loss, reference_loss)
+    torch.testing.assert_close(model.scores.grad, reference_model.scores.grad)
+
+
 @pytest.mark.parametrize("loss_cls", [LambdaLoss, RankNetLoss])
 @pytest.mark.parametrize("labels", [[0.0, 0.0], [1.0, 1.0], [1.0]])
 def test_ranking_loss_without_ordered_pairs_has_zero_loss_and_gradients(loss_cls, labels):

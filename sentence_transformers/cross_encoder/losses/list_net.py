@@ -139,7 +139,7 @@ class ListNetLoss(nn.Module):
 
         pairs = [(query, document) for query, docs in zip(queries, docs_list) for document in docs]
 
-        mini_batch_size = self.mini_batch_size or batch_size
+        mini_batch_size = batch_size if self.mini_batch_size is None else self.mini_batch_size
         if mini_batch_size <= 0:
             mini_batch_size = len(pairs)
 
