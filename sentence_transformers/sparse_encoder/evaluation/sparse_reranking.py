@@ -122,6 +122,7 @@ class SparseRerankingEvaluator(RerankingEvaluator):
     ):
         self.max_active_dims = max_active_dims
         self.sparsity_stats = defaultdict(list)
+        self._embedding_counts = defaultdict(int)
         super().__init__(
             samples=samples,
             at_k=at_k,
@@ -141,9 +142,11 @@ class SparseRerankingEvaluator(RerankingEvaluator):
         self, model: SparseEncoder, output_path: str | None = None, epoch: int = -1, steps: int = -1
     ) -> dict[str, float]:
         self.sparsity_stats = defaultdict(list)
+        self._embedding_counts = defaultdict(int)
         metrics = super().__call__(model=model, output_path=output_path, epoch=epoch, steps=steps)
         for key, value in self.sparsity_stats.items():
-            self.sparsity_stats[key] = sum(value) / len(value)
+            prefix = key.split("_", 1)[0]
+            self.sparsity_stats[key] = sum(value) / self._embedding_counts[prefix]
 
         metrics.update(self.prefix_name_to_metrics(self.sparsity_stats, self.name))
         self.store_metrics_in_model_card_data(model, metrics, epoch, steps)
@@ -187,8 +190,9 @@ class SparseRerankingEvaluator(RerankingEvaluator):
         )
         stat = model.sparsity(torch.stack(embeddings))
         prefix = "query" if encode_fn_name in ["query", None] else "corpus"
+        self._embedding_counts[prefix] += len(embeddings)
         for key, value in stat.items():
-            self.sparsity_stats[f"{prefix}_{key}"].append(value)
+            self.sparsity_stats[f"{prefix}_{key}"].append(value * len(embeddings))
         return embeddings
 
     def store_metrics_in_model_card_data(
