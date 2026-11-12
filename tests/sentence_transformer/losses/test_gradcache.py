@@ -510,6 +510,31 @@ def test_create_minibatch_keeps_query_expansion_positions() -> None:
         torch.testing.assert_close(minibatch["query_expansion_positions"], expansion_positions[begin:end])
 
 
+@pytest.mark.parametrize("as_tensor", [True, False])
+@pytest.mark.parametrize("begin,end,expected", [(0, 1, [0.5, 1.0]), (1, 2, [2.0]), (2, 3, [])])
+def test_create_minibatch_keeps_video_timestamps_aligned(as_tensor, begin, end, expected) -> None:
+    # Qwen2.5-VL timestamps describe videos, while rows may contain several videos or none.
+    timestamps = [0.5, 1.0, 2.0]
+    features = {
+        "input_ids": torch.ones(3, 6, dtype=torch.long),
+        "attention_mask": torch.ones(3, 6, dtype=torch.long),
+        "num_videos_per_sample": torch.tensor([2, 1, 0]),
+        "video_grid_thw": torch.tensor([[2, 2, 2]] * 3),
+        "pixel_values_videos": torch.zeros(24, 24),
+        "second_per_grid_ts": torch.tensor(timestamps) if as_tensor else timestamps,
+    }
+
+    minibatch = _create_minibatch(features, begin, end)
+
+    if expected:
+        torch.testing.assert_close(torch.as_tensor(minibatch["second_per_grid_ts"]), torch.tensor(expected))
+        assert len(minibatch["video_grid_thw"]) == len(expected)
+    else:
+        assert "second_per_grid_ts" not in minibatch
+        assert "video_grid_thw" not in minibatch
+    torch.testing.assert_close(torch.as_tensor(features["second_per_grid_ts"]), torch.tensor(timestamps))
+
+
 def test_gradcache_token_budget_trims_but_matches_mnrl(stsb_bert_tiny_model: SentenceTransformer) -> None:
     """Trimming padded mini-batches to their own width must not change the loss or gradient: the dropped
     columns are padding for every sequence in the mini-batch, so the transformer ignores them anyway."""

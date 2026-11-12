@@ -130,6 +130,9 @@ def _create_minibatch(sentence_feature: dict[str, Any], begin: int, end: int) ->
             else:
                 continue
 
+            if grid_key == "video_grid_thw" and "second_per_grid_ts" in sentence_feature:
+                custom_ranges["second_per_grid_ts"] = (grid_begin, grid_end)
+
             if grid_begin < grid_end:
                 tokens_per_item = grid.prod(dim=1)
                 token_cumsum = tokens_per_item.cumsum(dim=0)
@@ -175,12 +178,12 @@ def _create_minibatch(sentence_feature: dict[str, Any], begin: int, end: int) ->
 
         result: dict[str, Any] = {}
         for key, value in sentence_feature.items():
-            if not isinstance(value, torch.Tensor):
-                result[key] = value
-            elif key in custom_ranges:
+            if key in custom_ranges:
                 r_begin, r_end = custom_ranges[key]
                 if r_begin != r_end:
                     result[key] = value[r_begin:r_end]
+            elif not isinstance(value, torch.Tensor):
+                result[key] = value
             elif token_axis_end is not None and value.ndim >= 2 and value.shape[1] == seq_width:
                 result[key] = value[begin:end, :token_axis_end]
             else:
