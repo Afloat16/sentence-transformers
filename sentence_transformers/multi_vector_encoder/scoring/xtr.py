@@ -74,7 +74,7 @@ def xtr_scores(
         # Match the document-side fallback: zero-padded query rows must not contribute to scores or Z.
         queries_mask = _zero_row_mask(queries_embeddings).bool()
 
-    if chunk_elements is None:
+    if chunk_elements is None or Dt == 0:
         D_flat = docs_flat.reshape(Db * Dt, H).T
         scores = (Q_flat @ D_flat).view(Qb, Qt, Db, Dt)
         scores.masked_fill_(
@@ -98,6 +98,9 @@ def xtr_scores(
         scores = torch.cat(score_chunks, dim=2)
         # Freed before the scatter below, or the per-chunk copies and the full grid are alive at once.
         del score_chunks, chunk_scores
+
+    if Dt == 0:
+        return _fill_empty_document_scores(scores.float().sum(dim=(1, 3)), ~docs_mask_flat.bool().any(dim=-1))
 
     clubbed = scores.flatten(2, 3)
     top_values, indices = clubbed.topk(min(top_k, clubbed.shape[-1]), dim=-1, sorted=False)
