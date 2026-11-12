@@ -63,7 +63,13 @@ class WordWeights(Module):
         token_weights_expanded = token_weights.unsqueeze(-1).expand(token_embeddings.size())
         token_embeddings = token_embeddings * token_weights_expanded
 
-        features.update({"token_embeddings": token_embeddings, "token_weights_sum": token_weights_sum})
+        features.update(
+            {
+                "token_embeddings": token_embeddings,
+                "token_weights": token_weights,
+                "token_weights_sum": token_weights_sum,
+            }
+        )
         return features
 
     def save(self, output_path: str, *args, safe_serialization: bool = True, **kwargs) -> None:

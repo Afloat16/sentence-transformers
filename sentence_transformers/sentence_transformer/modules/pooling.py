@@ -208,7 +208,13 @@ class Pooling(Module):
                 if mean_sum is None:
                     mask = attention_mask.unsqueeze(-1).to(token_embeddings.dtype)
                     mean_sum = (token_embeddings * mask).sum(dim=1, dtype=accumulation_dtype)
-                    if "token_weights_sum" in features:
+                    if "token_weights" in features:
+                        token_weights = features["token_weights"]
+                        mean_output_dtype = torch.promote_types(mean_output_dtype, token_weights.dtype)
+                        mean_mask = (token_weights * attention_mask).sum(
+                            dim=1, dtype=torch.promote_types(accumulation_dtype, token_weights.dtype), keepdim=True
+                        )
+                    elif "token_weights_sum" in features:
                         mean_mask = features["token_weights_sum"].unsqueeze(-1)
                         mean_output_dtype = torch.promote_types(mean_output_dtype, mean_mask.dtype)
                         mean_mask = mean_mask.to(torch.promote_types(accumulation_dtype, mean_mask.dtype))
@@ -233,7 +239,11 @@ class Pooling(Module):
                 weighted_mask = mask * weights
                 sum_embeddings = (token_embeddings * weighted_mask).sum(dim=1)
                 output_dtype = token_embeddings.dtype
-                if "token_weights_sum" in features:
+                if "token_weights" in features:
+                    token_weights = features["token_weights"].unsqueeze(-1)
+                    output_dtype = torch.promote_types(output_dtype, token_weights.dtype)
+                    sum_mask = (token_weights * weighted_mask).sum(dim=1)
+                elif "token_weights_sum" in features:
                     sum_mask = features["token_weights_sum"].unsqueeze(-1)
                     output_dtype = torch.promote_types(output_dtype, sum_mask.dtype)
                     sum_mask = sum_mask.to(torch.promote_types(accumulation_dtype, sum_mask.dtype))
