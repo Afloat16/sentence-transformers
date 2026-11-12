@@ -15,6 +15,8 @@ class FlopsLoss(nn.Module):
         It calculates the squared L2 norm of the mean embedding vector, which helps reduce the number of floating-point
         operations (FLOPs) required during inference by encouraging more zero values in the embeddings.
         It can use a threshold to ignore embeddings with too few non-zero (active) elements.
+        Float16 and bfloat16 embeddings are accumulated in float32, including the returned loss,
+        so the vocabulary-wide penalty can be scaled by its regularization weight without overflowing first.
 
         This loss is used as a regularization component within other losses like :class:`SpladeLoss` rather than
         being used as a standalone loss function.
@@ -45,6 +47,8 @@ class FlopsLoss(nn.Module):
         )
 
     def compute_loss_from_embeddings(self, embeddings: torch.Tensor) -> torch.Tensor:
+        if embeddings.dtype in (torch.float16, torch.bfloat16):
+            embeddings = embeddings.float()
         if self.threshold is not None:
             l0_norm = (embeddings != 0).sum(dim=1)
             mask = (l0_norm > self.threshold).float()
