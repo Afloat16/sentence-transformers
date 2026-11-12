@@ -436,7 +436,8 @@ def test_no_duplicates_batch_sampler_list_values_match_between_hash_and_non_hash
 
 
 @pytest.mark.parametrize("precompute_hashes", [False, True])
-def test_no_duplicates_batch_sampler_deduplicates_images(precompute_hashes: bool) -> None:
+@pytest.mark.parametrize("dataset_format", [None, "numpy", "torch"])
+def test_no_duplicates_batch_sampler_deduplicates_images(precompute_hashes: bool, dataset_format: str | None) -> None:
     # PIL images stringify to a fresh object address on every dataset access, so without
     # content digests every image row looks unique and the dedup silently no-ops.
     pil_image = pytest.importorskip("PIL.Image")
@@ -453,7 +454,7 @@ def test_no_duplicates_batch_sampler_deduplicates_images(precompute_hashes: bool
     images = [pil_image.new("RGB", (4, 4), color) for color in ("red", "green", "blue", "yellow")]
     dataset = Dataset.from_dict(
         {"query": [f"query_{i}" for i in range(16)], "image": [images[i % 4] for i in range(16)]}
-    )
+    ).with_format(dataset_format)
     sampler = NoDuplicatesBatchSampler(
         dataset=dataset,
         batch_size=8,
@@ -469,7 +470,7 @@ def test_no_duplicates_batch_sampler_deduplicates_images(precompute_hashes: bool
     for batch in batches:
         # Only 4 unique images exist, so a batch of 8 must stop at 4 distinct rows.
         assert len(batch) == 4
-        pixels = {dataset[i]["image"].tobytes() for i in batch}
+        pixels = {np.asarray(dataset[i]["image"]).tobytes() for i in batch}
         assert len(pixels) == len(batch)
 
 
@@ -595,3 +596,22 @@ def test_no_duplicates_batch_sampler_uses_int64_indices_when_int32_range_is_exce
     _ = list(iter(sampler))
 
     assert captured_dtypes["index_dtype"] == torch.int64
+
+
+@pytest.mark.parametrize("dtype", [torch.uint8, torch.float32, torch.bfloat16])
+def test_sample_value_str_tensor_content(dtype: torch.dtype) -> None:
+    values = torch.arange(24).reshape(2, 3, 4).to(dtype)
+    equivalent = values.transpose(0, 1).contiguous().transpose(0, 1)
+    assert not equivalent.is_contiguous()
+    assert _sample_value_str(values) == _sample_value_str(equivalent)
+    assert _sample_value_str({"image": values}) == _sample_value_str({"image": values.clone()})
+    assert _sample_value_str([values]) == _sample_value_str([values.clone()])
+    assert _sample_value_str(values) != _sample_value_str(values + 1)
+    assert _sample_value_str(values) != _sample_value_str(values.reshape(6, 4))
+    assert _sample_value_str(values) != _sample_value_str(values.double())
+
+
+def test_sample_value_str_tensor_metadata_does_not_change_content() -> None:
+    value = torch.tensor(3.0, requires_grad=True)
+    assert _sample_value_str(value) == _sample_value_str(value.detach().clone())
+    assert _sample_value_str(torch.arange(3.0).conj()) == _sample_value_str(torch.arange(3.0))

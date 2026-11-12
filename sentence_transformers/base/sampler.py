@@ -375,6 +375,11 @@ def _sample_value_str(value: Any) -> str:
     if encoded is not None:
         value = encoded
     try:
+        if isinstance(value, torch.Tensor) and value.layout == torch.strided and not value.is_quantized:
+            # Pickled tensors contain a storage identifier, so separately decoded copies of
+            # the same media would never match. Digest logical values, shape, and dtype instead.
+            data = value.detach().cpu().resolve_conj().resolve_neg().contiguous().reshape(-1)
+            value = (str(value.dtype), tuple(value.shape), data.view(torch.uint8).numpy().tobytes())
         return hashlib.sha256(pickle.dumps(value)).hexdigest()
     except Exception:
         return str(value)
