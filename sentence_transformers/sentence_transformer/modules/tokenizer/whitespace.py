@@ -26,6 +26,7 @@ class WhitespaceTokenizer(WordTokenizer):
         return self.vocab
 
     def set_vocab(self, vocab: Iterable[str]):
+        vocab = list(vocab)
         self.vocab = vocab
         self.word2idx = collections.OrderedDict([(word, idx) for idx, word in enumerate(vocab)])
 
