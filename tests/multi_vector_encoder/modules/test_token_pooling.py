@@ -422,6 +422,18 @@ class TestMaxTokensBudget:
 
 
 class TestAdaptivePooling:
+    @pytest.mark.parametrize("autocast", [False, True])
+    def test_calibration_matches_float32_under_cpu_autocast(self, autocast) -> None:
+        documents = [_normed((length, 8)) for length in (12, 20, 30)]
+        expected = HierarchicalTokenPooling.calibrate_distance_threshold(documents, target_tokens=8)
+
+        with torch.autocast("cpu", dtype=torch.bfloat16, enabled=autocast):
+            threshold = HierarchicalTokenPooling.calibrate_distance_threshold(documents, target_tokens=8)
+            pooled = HierarchicalTokenPooling(distance_threshold=threshold).pool(documents)
+
+        assert threshold == expected
+        assert sum(map(len, pooled)) <= 24
+
     def test_redundant_documents_receive_fewer_tokens(self) -> None:
         repeated = torch.eye(8)[:1].repeat(8, 1)
         diverse = torch.eye(8)

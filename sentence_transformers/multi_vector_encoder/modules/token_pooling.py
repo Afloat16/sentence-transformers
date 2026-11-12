@@ -272,7 +272,8 @@ def _hierarchical_linkage(embedding: Tensor) -> np.ndarray:
     from scipy.spatial.distance import squareform
 
     embedding = embedding.detach().float().cpu()
-    distances = (1 - torch.mm(embedding, embedding.t())).clamp_(0, 2).numpy()
+    with torch.autocast("cpu", enabled=False):
+        distances = (1 - torch.mm(embedding, embedding.t())).clamp_(0, 2).numpy()
     return _WardClustering._linkage_fn()(squareform(distances, checks=False), method="ward")
 
 
