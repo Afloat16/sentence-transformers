@@ -121,9 +121,8 @@ class ContrastiveLoss(nn.Module):
         assert len(embeddings) == 2
         rep_anchor, rep_other = embeddings
         distances = self.distance_metric(rep_anchor, rep_other)
-        losses = 0.5 * (
-            labels.float() * distances.pow(2) + (1 - labels).float() * F.relu(self.margin - distances).pow(2)
-        )
+        labels = labels.float()
+        losses = 0.5 * (labels * distances.pow(2) + (1 - labels) * F.relu(self.margin - distances).pow(2))
         return losses.mean() if self.size_average else losses.sum()
 
     @property

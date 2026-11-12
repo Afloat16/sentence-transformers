@@ -4,12 +4,51 @@ import warnings
 
 import pytest
 import torch
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import Whitespace
 
+from sentence_transformers import SentenceTransformer
+from sentence_transformers.sentence_transformer.data_collator import SentenceTransformerDataCollator
 from sentence_transformers.sentence_transformer.losses.contrastive import ContrastiveLoss
 from sentence_transformers.sentence_transformer.losses.online_contrastive import OnlineContrastiveLoss
+from sentence_transformers.sentence_transformer.modules import StaticEmbedding
 
 CONTRASTIVE_WARNING = "ContrastiveLoss expects binary labels.*"
 ONLINE_WARNING = "OnlineContrastiveLoss expects binary labels.*"
+
+
+@pytest.mark.parametrize("label_type", [bool, int, float])
+@pytest.mark.parametrize("size_average", [True, False])
+def test_contrastive_binary_label_types_train_static_embeddings(label_type, size_average):
+    tokenizer = Tokenizer(WordLevel({"[UNK]": 0, "cat": 1, "dog": 2, "car": 3}, unk_token="[UNK]"))
+    tokenizer.pre_tokenizer = Whitespace()
+    embedding = StaticEmbedding(
+        tokenizer, embedding_weights=torch.tensor([[0.0, 0.0], [1.0, 0.0], [0.8, 0.2], [0.9, -0.1]])
+    )
+    model = SentenceTransformer(modules=[embedding], device="cpu")
+    collator = SentenceTransformerDataCollator(preprocess_fn=model.preprocess)
+    rows = [
+        {"sentence1": "cat", "sentence2": "dog", "label": label_type(1)},
+        {"sentence1": "cat", "sentence2": "car", "label": label_type(0)},
+    ]
+    batch = collator(rows)
+    features = [
+        {key[len(column) + 1 :]: value for key, value in batch.items() if key.startswith(f"{column}_")}
+        for column in ("sentence1", "sentence2")
+    ]
+    loss = ContrastiveLoss(model, size_average=size_average)
+    value = loss(features, batch["label"])
+    value.backward()
+    gradient = embedding.embedding.weight.grad.clone()
+    assert torch.isfinite(value) and torch.isfinite(gradient).all()
+    assert torch.count_nonzero(gradient)
+
+    model.zero_grad()
+    reference = loss(features, batch["label"].float())
+    reference.backward()
+    torch.testing.assert_close(value, reference)
+    torch.testing.assert_close(gradient, embedding.embedding.weight.grad)
 
 
 class _EchoModel:
