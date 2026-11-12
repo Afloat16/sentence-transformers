@@ -77,11 +77,12 @@ class BoW(InputModule):
 
         for tokens in tokenized_texts:
             vector = torch.zeros(self.get_embedding_dimension(), dtype=torch.float32)
-            for token in tokens:
-                if self.cumulative_term_frequency:
-                    vector[token] += self.weights[token]
-                else:
-                    vector[token] = self.weights[token]
+            indices = torch.tensor(tokens, dtype=torch.long)
+            weights = torch.tensor([self.weights[token] for token in tokens], dtype=torch.float32)
+            if self.cumulative_term_frequency:
+                vector.scatter_add_(0, indices, weights)
+            else:
+                vector[indices] = weights
             vectors.append(vector)
 
         return {"sentence_embedding": torch.stack(vectors)}
