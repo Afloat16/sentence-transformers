@@ -332,7 +332,8 @@ class CrossEncoder(BaseModel, FitMixin):
             )
             true_token_id = transformer_model.tokenizer.convert_tokens_to_ids("yes")
             false_token_id = transformer_model.tokenizer.convert_tokens_to_ids("no")
-            if true_token_id is None or false_token_id is None:
+            missing_token_ids = (None, transformer_model.tokenizer.unk_token_id)
+            if true_token_id in missing_token_ids or false_token_id in missing_token_ids:
                 raise ValueError(
                     "The tokenizer does not have 'yes' and/or 'no' tokens, which are used as the "
                     "default true/false tokens for the LogitScore post-processing module. Please "
