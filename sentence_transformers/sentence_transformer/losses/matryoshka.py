@@ -225,6 +225,7 @@ class MatryoshkaLoss(nn.Module):
             )
 
     def forward(self, sentence_features: Iterable[dict[str, Tensor]], labels: Tensor) -> Tensor:
+        sentence_features = list(sentence_features)
         # For the gradient-caching losses, the CachedLossDecorator has been applied to the `calculate_loss`
         # method, so we can directly call the loss function.
         if self.uses_gradient_cache:

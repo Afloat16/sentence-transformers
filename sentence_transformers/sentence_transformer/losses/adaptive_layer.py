@@ -211,6 +211,7 @@ class AdaptiveLayerLoss(nn.Module):
         return 1.0
 
     def forward(self, sentence_features: Iterable[dict[str, Tensor]], labels: Tensor) -> Tensor:
+        sentence_features = list(sentence_features)
         # Unwrap DDP (`.module`) / torch.compile (`_orig_mod`) wrappers so `self.model[0]`
         # decoration still works under multi-GPU or compiled training.
         unwrapped_model = self.model
