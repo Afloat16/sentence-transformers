@@ -35,8 +35,8 @@ class WeightedLayerPooling(Module):
         if ft_all_layers is None:
             return features
 
-        all_layer_embedding = torch.stack(ft_all_layers)
-        all_layer_embedding = all_layer_embedding[self.layer_start :, :, :, :]  # Start from 4th layers output
+        # Stack only the selected layers so unused layer copies are not retained for backward.
+        all_layer_embedding = torch.stack(ft_all_layers[self.layer_start :])
 
         weight_factor = self.layer_weights.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(all_layer_embedding.size())
         weighted_average = (weight_factor * all_layer_embedding).sum(dim=0) / self.layer_weights.sum()
