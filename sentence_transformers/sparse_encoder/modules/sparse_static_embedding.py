@@ -69,10 +69,10 @@ class SparseStaticEmbedding(InputModule):
         batch_size = input_ids.shape[0]
 
         # Create binary mask where 1 indicates token presence, shape: (batch_size, num_dimensions)
-        token_presence = torch.zeros(batch_size, self.num_dimensions, device=input_ids.device, dtype=torch.int64)
+        token_presence = torch.zeros(batch_size, self.num_dimensions, device=input_ids.device, dtype=torch.bool)
 
         # Only consider tokens where attention_mask is 1 by using the attention_mask as scatter values
-        token_presence.scatter_(1, input_ids, attention_mask)
+        token_presence.scatter_(1, input_ids, attention_mask.bool())
 
         # Multiply by weights to get final embeddings
         embeddings = token_presence * self.weight
