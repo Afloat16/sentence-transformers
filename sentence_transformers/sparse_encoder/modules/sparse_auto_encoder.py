@@ -191,7 +191,8 @@ class SparseAutoEncoder(Module):
         latents_pre_act = self.encode_pre_act(x_prepared)
 
         latents_k, latents_auxk = self.top_k(latents_pre_act, k)
-        latents_4k, _ = self.top_k(latents_pre_act, 4 * k)
+        # The expanded reconstruction can use all available latents when 4k exceeds the width.
+        latents_4k, _ = self.top_k(latents_pre_act, min(4 * k, self.hidden_dim))
 
         recons_k = self.decode(latents_k, info)
         recons_4k = self.decode(latents_4k, info)
