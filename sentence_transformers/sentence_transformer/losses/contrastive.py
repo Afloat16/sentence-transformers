@@ -10,6 +10,7 @@ from torch import Tensor, nn
 
 from sentence_transformers.base.losses.merged_forward import embed_columns
 from sentence_transformers.sentence_transformer.model import SentenceTransformer
+from sentence_transformers.util.tensor import _convert_to_float_tensor
 
 
 class SiameseDistanceMetric(Enum):
@@ -120,7 +121,7 @@ class ContrastiveLoss(nn.Module):
 
         assert len(embeddings) == 2
         rep_anchor, rep_other = embeddings
-        distances = self.distance_metric(rep_anchor, rep_other)
+        distances = _convert_to_float_tensor(self.distance_metric(rep_anchor, rep_other))
         losses = 0.5 * (
             labels.float() * distances.pow(2) + (1 - labels).float() * F.relu(self.margin - distances).pow(2)
         )

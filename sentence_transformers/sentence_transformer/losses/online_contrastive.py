@@ -9,6 +9,7 @@ from torch import Tensor, nn
 
 from sentence_transformers.base.losses.merged_forward import embed_columns
 from sentence_transformers.sentence_transformer.model import SentenceTransformer
+from sentence_transformers.util.tensor import _convert_to_float_tensor
 
 from .contrastive import SiameseDistanceMetric
 
@@ -97,7 +98,7 @@ class OnlineContrastiveLoss(nn.Module):
                     stacklevel=4,
                 )
 
-        distance_matrix = self.distance_metric(embeddings[0], embeddings[1])
+        distance_matrix = _convert_to_float_tensor(self.distance_metric(embeddings[0], embeddings[1]))
         negs = distance_matrix[labels == 0]
         poss = distance_matrix[labels == 1]
 
