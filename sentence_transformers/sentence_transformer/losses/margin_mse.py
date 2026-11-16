@@ -9,6 +9,7 @@ from torch import Tensor, nn
 from sentence_transformers.base.losses.merged_forward import embed_columns
 from sentence_transformers.sentence_transformer.model import SentenceTransformer
 from sentence_transformers.util import pairwise_dot_score, similarity_fct_name
+from sentence_transformers.util.tensor import _convert_to_float_tensor
 
 
 class MarginMSELoss(nn.Module):
@@ -184,7 +185,8 @@ class MarginMSELoss(nn.Module):
         batch_size = embeddings_query.shape[0]
 
         # Compute similarity scores for positive passage
-        scores_pos = self.similarity_fct(embeddings_query, embeddings_pos)
+        scores_pos = _convert_to_float_tensor(self.similarity_fct(embeddings_query, embeddings_pos))
+        labels = _convert_to_float_tensor(labels.detach())
 
         if labels.shape == (batch_size, len(embeddings_negs) + 1):
             # If labels are given as a single score for positive and multiple negatives,
@@ -204,17 +206,18 @@ class MarginMSELoss(nn.Module):
             )
 
         # Handle both single and multiple negative cases
-        labels = labels.detach()
         if len(embeddings_negs) == 1:
-            scores_neg = self.similarity_fct(embeddings_query, embeddings_negs[0])
+            scores_neg = _convert_to_float_tensor(self.similarity_fct(embeddings_query, embeddings_negs[0]))
             margin_pred = (scores_pos - scores_neg).unsqueeze(1)
-            return self.loss_fct(margin_pred, labels)
+            return self.loss_fct(margin_pred, labels.to(margin_pred.dtype))
         else:
             # Multiple negatives case
-            scores_negs = [self.similarity_fct(embeddings_query, neg) for neg in embeddings_negs]
+            scores_negs = [
+                _convert_to_float_tensor(self.similarity_fct(embeddings_query, neg)) for neg in embeddings_negs
+            ]
             margins = [scores_pos - neg_score for neg_score in scores_negs]
             margins = torch.stack(margins, dim=1)  # Shape: (batch_size, num_negatives)
-            return self.loss_fct(margins, labels)
+            return self.loss_fct(margins, labels.to(margins.dtype))
 
     def get_config_dict(self) -> dict[str, Any]:
         return {

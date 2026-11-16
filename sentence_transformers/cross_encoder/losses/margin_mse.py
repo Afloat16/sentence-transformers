@@ -5,6 +5,7 @@ from torch import Tensor, nn
 
 from sentence_transformers.cross_encoder.model import CrossEncoder
 from sentence_transformers.util import batch_to_device, fullname
+from sentence_transformers.util.tensor import _convert_to_float_tensor
 
 
 class MarginMSELoss(nn.Module):
@@ -116,6 +117,7 @@ class MarginMSELoss(nn.Module):
         # a single tensor of shape (batch_size, num_columns - 1)
         if isinstance(labels, list):
             labels = torch.stack(labels)
+        labels = _convert_to_float_tensor(labels.detach())
 
         if labels.shape == (batch_size, len(negatives) + 1):
             # If labels are given as a single score for positive and multiple negatives,
@@ -135,14 +137,16 @@ class MarginMSELoss(nn.Module):
             )
 
         positive_pairs = list(zip(anchors, positives))
-        positive_logits = self.logits_from_pairs(positive_pairs, prompt=prompt, task=task)
+        positive_logits = _convert_to_float_tensor(self.logits_from_pairs(positive_pairs, prompt=prompt, task=task))
         negative_logits_list = []
         for negative in negatives:
             negative_pairs = list(zip(anchors, negative))
-            negative_logits_list.append(self.logits_from_pairs(negative_pairs, prompt=prompt, task=task))
+            negative_logits_list.append(
+                _convert_to_float_tensor(self.logits_from_pairs(negative_pairs, prompt=prompt, task=task))
+            )
 
         margin_logits = positive_logits.unsqueeze(1) - torch.stack(negative_logits_list, dim=1)
-        loss = self.loss_fct(margin_logits, labels.detach().float())
+        loss = self.loss_fct(margin_logits, labels.to(margin_logits.dtype))
         return loss
 
     def logits_from_pairs(

@@ -9,6 +9,7 @@ from torch import Tensor, nn
 from sentence_transformers.base.losses.merged_forward import embed_columns_padded
 from sentence_transformers.multi_vector_encoder.model import MultiVectorEncoder
 from sentence_transformers.util import similarity_fct_name
+from sentence_transformers.util.tensor import _convert_to_float_tensor
 
 
 class MultiVectorMarginMSELoss(nn.Module):
@@ -140,7 +141,8 @@ class MultiVectorMarginMSELoss(nn.Module):
 
         pos, *negs = embeddings
         pos_mask, *neg_masks = masks
-        pos_scores = self._score(q, pos, q_mask, pos_mask)
+        pos_scores = _convert_to_float_tensor(self._score(q, pos, q_mask, pos_mask))
+        labels = _convert_to_float_tensor(labels.detach())
 
         batch_size = q.shape[0]
 
@@ -164,7 +166,8 @@ class MultiVectorMarginMSELoss(nn.Module):
                 f"(length {len(negs)}), or 2) lists of positive and negative scores (length {len(negs) + 1})."
             )
         student_margins = torch.stack(
-            [pos_scores - self._score(q, n, q_mask, nm) for n, nm in zip(negs, neg_masks)], dim=1
+            [pos_scores - _convert_to_float_tensor(self._score(q, n, q_mask, nm)) for n, nm in zip(negs, neg_masks)],
+            dim=1,
         )
         return self.loss_function(student_margins, labels.detach().to(student_margins.dtype))
 
