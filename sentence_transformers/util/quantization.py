@@ -160,16 +160,21 @@ def semantic_search_faiss(
     if rescore_embeddings is not None:
         # FAISS pads short result sets with index -1, and reconstruct(-1) reads out of bounds
         # (or segfaults on an empty index), so the padding slots get a zero placeholder instead
-        if corpus_precision == "ubinary":
-            zero_embedding = np.zeros(corpus_index.d // 8, dtype=np.uint8)
+        if corpus_precision == "uint8":
+            # Floating-point FAISS indexes support one native reconstruction call for all
+            # candidate keys. Binary indexes expose only the per-vector API below.
+            top_k_embeddings = np.zeros((*indices.shape, corpus_index.d), dtype=np.float32)
+            valid = indices != -1
+            if valid.any():
+                top_k_embeddings[valid] = corpus_index.reconstruct_batch(indices[valid])
         else:
-            zero_embedding = np.zeros(corpus_index.d, dtype=np.float32)
-        top_k_embeddings = np.array(
-            [
-                [corpus_index.reconstruct(idx.item()) if idx != -1 else zero_embedding for idx in query_indices]
-                for query_indices in indices
-            ]
-        )
+            zero_embedding = np.zeros(corpus_index.d // 8, dtype=np.uint8)
+            top_k_embeddings = np.array(
+                [
+                    [corpus_index.reconstruct(idx.item()) if idx != -1 else zero_embedding for idx in query_indices]
+                    for query_indices in indices
+                ]
+            )
         # `np.packbits` padded the embedding dimension up to a whole byte, so trim those bits back off
         if corpus_precision == "ubinary":
             top_k_embeddings = np.unpackbits(top_k_embeddings, axis=-1)[..., : rescore_embeddings.shape[-1]]
