@@ -167,7 +167,7 @@ class WordEmbeddings(InputModule):
 
         embeddings_dimension = None
         vocab = []
-        embeddings = []
+        embedding_data = bytearray()
 
         with (
             gzip.open(embeddings_file_path, "rt", encoding="utf8")
@@ -186,7 +186,7 @@ class WordEmbeddings(InputModule):
                 if embeddings_dimension is None:
                     embeddings_dimension = len(split) - 1
                     vocab.append("PADDING_TOKEN")
-                    embeddings.append(np.zeros(embeddings_dimension))
+                    embedding_data.extend(np.zeros(embeddings_dimension, dtype=np.float64).tobytes())
 
                 if (
                     len(split) - 1
@@ -196,14 +196,18 @@ class WordEmbeddings(InputModule):
                     )
                     continue
 
-                vector = np.array([float(num) for num in split[1:]])
-                embeddings.append(vector)
+                vector = np.asarray(split[1:], dtype=np.float64)
+                embedding_data.extend(vector.tobytes())
                 vocab.append(word)
 
                 if max_vocab_size is not None and max_vocab_size > 0 and len(vocab) > max_vocab_size:
                     break
 
-            embeddings = np.asarray(embeddings)
+            # Keep one contiguous numeric buffer rather than every row plus a stacked copy.
+            # Float64 preserves the original parsing precision before the embedding module casts it.
+            embeddings = np.frombuffer(embedding_data, dtype=np.float64)
+            if embeddings_dimension is not None:
+                embeddings = embeddings.reshape(len(vocab), embeddings_dimension)
 
             tokenizer.set_vocab(vocab)
             return cls(tokenizer=tokenizer, embedding_weights=embeddings, update_embeddings=update_embeddings)
