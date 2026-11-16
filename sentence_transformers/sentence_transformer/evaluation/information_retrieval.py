@@ -622,10 +622,11 @@ class InformationRetrievalEvaluator(BaseEvaluator):
 
     @staticmethod
     def compute_dcg_at_k(relevances, k):
-        dcg = 0
-        for i in range(min(len(relevances), k)):
-            dcg += relevances[i] / np.log2(i + 2)  # +2 as we start our idx at 0
-        return dcg
+        count = min(len(relevances), k)
+        if count <= 0:
+            return 0
+        discounts = np.log2(np.arange(2, count + 2))
+        return np.sum(np.asarray(relevances[:count]) / discounts)
 
     def get_config_dict(self):
         config_dict = {}
