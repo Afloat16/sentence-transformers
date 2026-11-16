@@ -153,13 +153,14 @@ class ReciprocalRankFusionEvaluator(BaseEvaluator):
             positive = dense_sample["positive"]
             if isinstance(positive, str):
                 positive = [positive]
+            positive_set = set(positive)
 
             # Get documents from both retrievers
             dense_docs = dense_sample["documents"]
             sparse_docs = sparse_sample["documents"]
 
             # Calculate base metrics for dense retriever
-            dense_is_relevant = [int(sample in positive) for sample in dense_docs]
+            dense_is_relevant = [int(sample in positive_set) for sample in dense_docs]
 
             dense_pred_scores = np.arange(len(dense_docs), 0, -1)
             dense_mrr, dense_ndcg, dense_ap = self.compute_metrics(dense_is_relevant, dense_pred_scores, len(positive))
@@ -169,7 +170,7 @@ class ReciprocalRankFusionEvaluator(BaseEvaluator):
             dense_ap_scores.append(dense_ap)
 
             # Calculate base metrics for sparse retriever
-            sparse_is_relevant = [int(sample in positive) for sample in sparse_docs]
+            sparse_is_relevant = [int(sample in positive_set) for sample in sparse_docs]
 
             sparse_pred_scores = np.arange(len(sparse_docs), 0, -1)
             sparse_mrr, sparse_ndcg, sparse_ap = self.compute_metrics(
@@ -201,7 +202,7 @@ class ReciprocalRankFusionEvaluator(BaseEvaluator):
             fused_docs = sorted(rrf_scores.keys(), key=lambda doc: rrf_scores[doc], reverse=True)
 
             # Create binary relevance list for evaluation
-            fusion_is_relevant = [int(sample in positive) for sample in fused_docs]
+            fusion_is_relevant = [int(sample in positive_set) for sample in fused_docs]
 
             num_queries += 1
             num_positives.append(len(positive))
