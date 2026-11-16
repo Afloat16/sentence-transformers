@@ -200,12 +200,17 @@ class ADRMSELoss(nn.Module):
         # documents sharing a label share a fractional target rank that the ApproxRank
         # can attain when the model assigns tied docs equal scores. Padded positions are
         # excluded from the counts via the mask and are masked out of the loss later.
-        labels_j = labels_matrix.unsqueeze(1)
-        labels_i = labels_matrix.unsqueeze(2)
-        valid_j = mask.unsqueeze(1)
-        greater = ((labels_j > labels_i) & valid_j).sum(dim=-1).float()
-        equal = ((labels_j == labels_i) & valid_j).sum(dim=-1).float()
+        valid_labels = mask & ~labels_matrix.isnan()
+        valid_counts = valid_labels.sum(dim=1, keepdim=True)
+        sorted_labels = labels_matrix.masked_fill(~valid_labels, float("inf")).sort(dim=1).values
+        # Cap search bounds at the valid count so padding cannot join a real +inf tie.
+        left = torch.searchsorted(sorted_labels, labels_matrix).minimum(valid_counts)
+        right = torch.searchsorted(sorted_labels, labels_matrix, right=True).minimum(valid_counts)
+        greater = (valid_counts - right).float()
+        equal = (right - left).float()
         true_ranks = greater + (equal + 1.0) / 2.0
+        # NaN labels compare neither greater nor equal, matching the scalar definition.
+        true_ranks = true_ranks.masked_fill(labels_matrix.isnan(), 0.5)
 
         approx_ranks = self.approximate_ranks(logits_matrix, mask)
 
