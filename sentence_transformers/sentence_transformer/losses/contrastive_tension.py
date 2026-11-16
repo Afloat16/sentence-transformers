@@ -11,7 +11,7 @@ from torch import Tensor, nn
 
 from sentence_transformers.sentence_transformer.model import SentenceTransformer
 from sentence_transformers.sentence_transformer.readers import InputExample
-from sentence_transformers.util import cos_sim, similarity_fct_name
+from sentence_transformers.util import cos_sim, pairwise_dot_score, similarity_fct_name
 
 
 class ContrastiveTensionLoss(nn.Module):
@@ -137,9 +137,8 @@ class ContrastiveTensionLoss(nn.Module):
         reps_1 = self.model1(sentence_features1)["sentence_embedding"]  # (bsz, hdim)
         reps_2 = self.model2(sentence_features2)["sentence_embedding"]
 
-        sim_scores = (
-            torch.matmul(reps_1[:, None], reps_2[:, :, None]).squeeze(-1).squeeze(-1)
-        )  # (bsz,) dot product, i.e. S1S2^T
+        # The shared scorer accumulates low-precision embeddings in float32, including under autocast.
+        sim_scores = pairwise_dot_score(reps_1, reps_2)
 
         if labels is None:
             # identical sentence -> 1, different -> 0
