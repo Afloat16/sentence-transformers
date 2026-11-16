@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import logging
 import os
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import TYPE_CHECKING
 
 from sentence_transformers.base.evaluation.evaluator import BaseEvaluator
@@ -258,12 +258,13 @@ class ParaphraseMiningEvaluator(BaseEvaluator):
                 connected_subgraph_nodes.add(a)
 
                 # Add all nodes in the connected graph, following only the pairs marked as duplicates
-                neighbor_nodes_queue = [node for node, is_duplicate in graph[a].items() if is_duplicate]
-                while len(neighbor_nodes_queue) > 0:
-                    node = neighbor_nodes_queue.pop(0)
-                    if node not in connected_subgraph_nodes:
-                        connected_subgraph_nodes.add(node)
-                        neighbor_nodes_queue.extend(n for n, is_duplicate in graph[node].items() if is_duplicate)
+                neighbor_nodes_queue = deque([a])
+                while neighbor_nodes_queue:
+                    node = neighbor_nodes_queue.popleft()
+                    for neighbor, is_duplicate in graph[node].items():
+                        if is_duplicate and neighbor not in connected_subgraph_nodes:
+                            connected_subgraph_nodes.add(neighbor)
+                            neighbor_nodes_queue.append(neighbor)
 
                 # Ensure transitivity between all nodes in the graph
                 connected_subgraph_nodes = list(connected_subgraph_nodes)
