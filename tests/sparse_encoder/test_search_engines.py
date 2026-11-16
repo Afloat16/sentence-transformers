@@ -109,6 +109,9 @@ class StubQdrantClient:
         self.searched.append((query.indices, query.values))
         return StubResponse([StubHit(0, 1.0)])
 
+    def query_batch_points(self, requests, **kwargs):
+        return [self.query_points(request.query) for request in requests]
+
 
 @pytest.fixture
 def stub_qdrant_module(monkeypatch):
@@ -118,6 +121,7 @@ def stub_qdrant_module(monkeypatch):
     http = types.ModuleType("qdrant_client.http")
     models = types.ModuleType("qdrant_client.http.models")
     models.SparseVector = StubSparseVector
+    models.QueryRequest = types.SimpleNamespace
     models.SparseVectorParams = types.SimpleNamespace
     models.SparseIndexParams = types.SimpleNamespace
     http.models = models

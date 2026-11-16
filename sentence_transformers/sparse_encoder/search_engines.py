@@ -38,6 +38,7 @@ def semantic_search_qdrant(
     corpus_index: tuple[QdrantClient, str] | None = None,
     top_k: int = 10,
     output_index: bool = False,
+    query_batch_size: int = 64,
     **kwargs: Any,
 ) -> (
     tuple[list[list[dict[str, int | float]]], float]
@@ -54,6 +55,7 @@ def semantic_search_qdrant(
             If provided, uses this existing index for search
         top_k: Number of top results to retrieve
         output_index: Whether to return the Qdrant client and collection name
+        query_batch_size: Maximum number of queries sent in one Qdrant request. Defaults to 64.
 
     Returns:
         A tuple containing:
@@ -66,6 +68,9 @@ def semantic_search_qdrant(
         from qdrant_client.http import models
     except ImportError:
         raise ImportError("Please install the Qdrant client with `pip install qdrant-client` to use this function.")
+
+    if query_batch_size <= 0:
+        raise ValueError("query_batch_size must be greater than zero")
 
     # Validate input sparse tensors
     if not query_embeddings.is_sparse or query_embeddings.layout != torch.sparse_coo:
@@ -135,27 +140,29 @@ def semantic_search_qdrant(
     all_results = []
     search_start_time = time.time()
 
-    # Process each query
+    # Coalescing sorts the rows, so each query's coordinates can be sliced once.
     query_embeddings = query_embeddings.coalesce()
     query_indices = query_embeddings.indices().cpu().numpy()
     query_values = _tensor_to_numpy(query_embeddings.values())
-    for q_idx in range(query_embeddings.size(0)):
-        # Extract query vector
-        mask = query_indices[0] == q_idx
-        q_indices = query_indices[1][mask].tolist()
-        q_values = query_values[mask].tolist()
-
-        # Perform search
-        search_results = client.query_points(
-            collection_name=collection_name,
-            query=models.SparseVector(indices=q_indices, values=q_values),
-            limit=top_k,
-            using="text",
-        ).points
-
-        # Format results
-        formatted_results = [{"corpus_id": hit.id, "score": hit.score} for hit in search_results]
-        all_results.append(formatted_results)
+    num_queries = query_embeddings.size(0)
+    boundaries = np.searchsorted(query_indices[0], np.arange(num_queries + 1))
+    for batch_start in range(0, num_queries, query_batch_size):
+        requests = []
+        for q_idx in range(batch_start, min(batch_start + query_batch_size, num_queries)):
+            start, end = boundaries[q_idx : q_idx + 2]
+            requests.append(
+                models.QueryRequest(
+                    query=models.SparseVector(
+                        indices=query_indices[1, start:end].tolist(), values=query_values[start:end].tolist()
+                    ),
+                    limit=top_k,
+                    using="text",
+                )
+            )
+        responses = client.query_batch_points(collection_name=collection_name, requests=requests)
+        all_results.extend(
+            [{"corpus_id": hit.id, "score": hit.score} for hit in response.points] for response in responses
+        )
 
     search_time = time.time() - search_start_time
 
