@@ -18,6 +18,7 @@ from sentence_transformers.base.losses.gradcache import (
     _validate_mini_batch_num_tokens,
     has_static_embedding_input,
 )
+from sentence_transformers.sentence_transformer.losses.gist_embed import _cosine_similarity_matrix
 from sentence_transformers.sentence_transformer.model import SentenceTransformer
 from sentence_transformers.util import all_gather_with_grad, batch_to_device, get_rank
 
@@ -173,7 +174,7 @@ class CachedGISTEmbedLoss(nn.Module):
         self.cross_entropy_loss = nn.CrossEntropyLoss()
 
     def sim_matrix(self, embed1: Tensor, embed2: Tensor) -> Tensor:
-        return self.similarity_fct(embed1.unsqueeze(1), embed2.unsqueeze(0))
+        return _cosine_similarity_matrix(embed1, embed2, self.similarity_fct)
 
     def embed_minibatch(
         self,

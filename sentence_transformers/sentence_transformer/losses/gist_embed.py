@@ -13,6 +13,28 @@ from sentence_transformers.sentence_transformer.modules import StaticEmbedding
 from sentence_transformers.util import all_gather_with_grad, batch_to_device, get_rank
 
 
+def _cosine_similarity_matrix(embed1: Tensor, embed2: Tensor, similarity_fct: nn.Module) -> Tensor:
+    if (
+        type(similarity_fct) is not nn.CosineSimilarity
+        or similarity_fct.dim != -1
+        or embed1.dtype != embed2.dtype
+        or embed1.dtype not in (torch.float32, torch.float64)
+        or embed1.device.type not in ("cpu", "cuda")
+    ):
+        return similarity_fct(embed1.unsqueeze(1), embed2.unsqueeze(0))
+
+    # Normalize each embedding once instead of expanding to (batch1, batch2, dim).
+    # CosineSimilarity does not autocast float32 inputs to the matrix-multiply dtype.
+    with torch.autocast(device_type=embed1.device.type, enabled=False):
+        norm1 = torch.linalg.vector_norm(embed1, dim=-1, keepdim=True).clone()
+        norm2 = torch.linalg.vector_norm(embed2, dim=-1, keepdim=True).clone()
+        # Match CosineSimilarity's gradient below eps: the clamp is outside autograd.
+        with torch.no_grad():
+            norm1.clamp_(min=similarity_fct.eps)
+            norm2.clamp_(min=similarity_fct.eps)
+        return (embed1 / norm1) @ (embed2 / norm2).T
+
+
 class GISTEmbedLoss(nn.Module):
     def __init__(
         self,
@@ -135,7 +157,7 @@ class GISTEmbedLoss(nn.Module):
         self.cross_entropy_loss = nn.CrossEntropyLoss()
 
     def sim_matrix(self, embed1: Tensor, embed2: Tensor) -> Tensor:
-        return self.similarity_fct(embed1.unsqueeze(1), embed2.unsqueeze(0))
+        return _cosine_similarity_matrix(embed1, embed2, self.similarity_fct)
 
     def forward(self, sentence_features: Iterable[dict[str, Tensor]], labels: Tensor) -> Tensor:
         sentence_features = list(sentence_features)
