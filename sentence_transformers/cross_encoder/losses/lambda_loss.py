@@ -10,6 +10,11 @@ from sentence_transformers.cross_encoder import CrossEncoder
 from sentence_transformers.util import batch_to_device, fullname
 
 
+def _scaled_gains(relevance: Tensor, max_relevance: Tensor) -> Tensor:
+    """Compute ``(2**relevance - 1) / 2**max_relevance`` without overflow or cancellation."""
+    return torch.exp2(relevance - max_relevance) * -torch.expm1(-relevance * math.log(2))
+
+
 class BaseWeightingScheme(nn.Module):
     """Base class for implementing weighting schemes in LambdaLoss."""
 
@@ -310,8 +315,13 @@ class LambdaLoss(nn.Module):
 
         pos_idxs = torch.arange(1, max_docs + 1).to(self.model.device)
         discount = torch.log2(1.0 + pos_idxs.float())[None, :]
-        maxDCGs = torch.sum(((torch.pow(2, labels_matrix_sorted) - 1) / discount)[:, :k], dim=-1).clamp(min=self.eps)
-        gain = (torch.pow(2, true_sorted_by_preds) - 1) / maxDCGs[:, None]
+        # A common power-of-two factor cancels between gains and ideal DCG. Keep
+        # the epsilon floor on its original scale when applying that factor.
+        max_relevance = labels_matrix_sorted[:, :1]
+        ideal_gains = _scaled_gains(labels_matrix_sorted, max_relevance)
+        maxDCGs = torch.sum((ideal_gains / discount)[:, :k], dim=-1, keepdim=True)
+        maxDCGs = torch.maximum(maxDCGs, self.eps * torch.exp2(-max_relevance))
+        gain = _scaled_gains(true_sorted_by_preds, max_relevance) / maxDCGs
 
         # Apply weighting scheme
         weights = self.weighting_scheme(gain, discount, true_sorted_by_preds)
