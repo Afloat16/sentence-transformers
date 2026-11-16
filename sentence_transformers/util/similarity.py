@@ -21,6 +21,12 @@ from .tensor import (
 logger = logging.get_logger(__name__)
 
 
+def _match_dtypes(a: Tensor, b: Tensor) -> tuple[Tensor, Tensor]:
+    """Promote scoring operands to a common dtype without copying same-dtype inputs."""
+    dtype = torch.promote_types(a.dtype, b.dtype)
+    return a.to(dtype), b.to(dtype)
+
+
 def _match_layouts(a: Tensor, b: Tensor) -> tuple[Tensor, Tensor]:
     """
     Converts the dense tensor to sparse COO if exactly one of the two inputs is sparse, so that mixed inputs can
@@ -434,6 +440,7 @@ def maxsim(
         Tensor: Matrix with ``res[i][j]`` = MaxSim(a[i], b[j]), shape ``(batch_a, batch_b)``, always
         float32 (half precision inputs are accumulated in float32 to keep nearby scores distinct), on
         the documents' device: CPU documents score on the CPU even against GPU queries.
+        Mixed input dtypes are promoted to their common dtype before token-level scoring.
     """
     return _maxsim(a, b, a_mask, b_mask, chunk_elements, length_normalize, device, score_chunk=_maxsim_score_documents)
 
@@ -483,7 +490,10 @@ def _maxsim(
         score_chunks = []
         for d_start, d_end in document_ranges:
             chunk_b, chunk_b_mask = _pad_chunk(b, b_mask, d_start, d_end, scoring_device, "b_mask")
-            score_chunks.append(score_chunk(chunk_a, chunk_b, chunk_a_mask, chunk_b_mask).to(result_device))
+            # NumPy exports of bf16 embeddings are float32, even when the queries remain bf16.
+            # Match operands before calling either the reference scorer or an optional kernel.
+            score_a, score_b = _match_dtypes(chunk_a, chunk_b)
+            score_chunks.append(score_chunk(score_a, score_b, chunk_a_mask, chunk_b_mask).to(result_device))
         query_score_chunks.append(score_chunks[0] if len(score_chunks) == 1 else torch.cat(score_chunks, dim=1))
     # cat copies even a single chunk, which is the common case of a batch that fits the budget.
     scores = query_score_chunks[0] if len(query_score_chunks) == 1 else torch.cat(query_score_chunks, dim=0)
@@ -596,6 +606,7 @@ def maxsim_pairwise(
         Tensor: Vector with ``res[i]`` = MaxSim(a[i], b[i]), shape ``(batch,)``, always float32
         (half precision inputs are accumulated in float32 to keep nearby scores distinct), on the
         documents' device: CPU documents score on the CPU even against GPU queries.
+        Mixed input dtypes are promoted to their common dtype before token-level scoring.
     """
     return _maxsim_pairwise(
         a, b, a_mask, b_mask, chunk_elements, length_normalize, device, score_chunk=_maxsim_score_pairs
@@ -650,6 +661,7 @@ def _maxsim_pairwise(
     for start, end in ranges:
         chunk_a, chunk_a_mask = _pad_chunk(a, a_mask, start, end, scoring_device, "a_mask")
         chunk_b, chunk_b_mask = _pad_chunk(b, b_mask, start, end, scoring_device, "b_mask")
+        chunk_a, chunk_b = _match_dtypes(chunk_a, chunk_b)
         score_chunks.append(score_chunk(chunk_a, chunk_b, chunk_a_mask, chunk_b_mask).to(result_device))
     scores = score_chunks[0] if len(score_chunks) == 1 else torch.cat(score_chunks, dim=0)
     if query_token_counts is not None:

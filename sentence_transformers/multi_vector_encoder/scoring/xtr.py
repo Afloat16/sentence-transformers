@@ -3,7 +3,12 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from sentence_transformers.util.similarity import _chunk_ranges, _fill_empty_document_scores, _zero_row_mask
+from sentence_transformers.util.similarity import (
+    _chunk_ranges,
+    _fill_empty_document_scores,
+    _match_dtypes,
+    _zero_row_mask,
+)
 from sentence_transformers.util.tensor import _convert_to_tensor
 
 
@@ -21,7 +26,7 @@ def xtr_scores(
     (simulating retrieval from an index). Returns the full ``(Q, Q*N)`` cross-product score matrix with
     query-major ordering: ``scores[i, j*N + n]`` is query ``i`` against query ``j``'s ``n``-th document.
     The positive for query ``i`` sits at column ``i*N``. As in :func:`~sentence_transformers.util.similarity.maxsim`,
-    the matmul runs in the input dtype (integer embeddings are upcast to float32 first) and the
+    the matmul runs in the common input dtype (integer embeddings are upcast to float32 first) and the
     per-query-token accumulation and returned scores are float32.
 
     Each score is the sum of the query's retrieved per-token maxima divided by ``Z``, the number of
@@ -59,6 +64,7 @@ def xtr_scores(
         queries_embeddings = queries_embeddings.float()
     if not documents_embeddings.is_floating_point():
         documents_embeddings = documents_embeddings.float()
+    queries_embeddings, documents_embeddings = _match_dtypes(queries_embeddings, documents_embeddings)
     Qb, Qt, H = queries_embeddings.shape
     D, N, Dt, _ = documents_embeddings.shape
     Db = D * N
