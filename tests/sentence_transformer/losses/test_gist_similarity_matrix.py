@@ -54,9 +54,33 @@ def test_cosine_matrix_preserves_values_and_gradients(loss_class, dtype, scale, 
     expected_grads = torch.autograd.grad((expected * weights).sum(), (left, right))
     actual_grads = torch.autograd.grad((actual * weights).sum(), (left, right))
     for actual_grad, expected_grad in zip(actual_grads, expected_grads):
-        # Matrix multiplication sums the float32 gradient contributions in a different order.
-        tolerance = {"rtol": 1e-5, "atol": 1e-5} if dtype == torch.float32 else {}
-        torch.testing.assert_close(actual_grad, expected_grad, **tolerance)
+        if dtype == torch.float32:
+            # The reductions sum contributions in different orders. A component can
+            # nearly cancel, so compare roundoff relative to the whole gradient norm.
+            norm = expected_grad.norm().clamp_min(torch.finfo(expected_grad.dtype).tiny)
+            torch.testing.assert_close(actual_grad / norm, expected_grad / norm, rtol=2e-6, atol=2e-7)
+        else:
+            torch.testing.assert_close(actual_grad, expected_grad)
+
+
+@pytest.mark.parametrize("loss_class", [GISTEmbedLoss, CachedGISTEmbedLoss])
+@pytest.mark.parametrize("scale", [1e-10, 1.0, 1e8])
+def test_float32_cosine_gradients_match_double_precision_reference(loss_class, scale):
+    loss = _make_loss(loss_class)
+    generator = torch.Generator().manual_seed(13)
+    left = (torch.randn(7, 3, generator=generator) * scale).T.requires_grad_()
+    right = (torch.randn(7, 5, generator=generator) * scale).T.requires_grad_()
+    weights = torch.randn(3, 5, generator=generator)
+    reference_inputs = tuple(value.detach().double().requires_grad_() for value in (left, right))
+    expected = nn.functional.cosine_similarity(
+        reference_inputs[0][:, None], reference_inputs[1][None, :], dim=-1, eps=loss.similarity_fct.eps
+    )
+    expected_grads = torch.autograd.grad((expected * weights.double()).sum(), reference_inputs)
+    actual = loss.sim_matrix(left, right)
+    actual_grads = torch.autograd.grad((actual * weights).sum(), (left, right))
+    for actual_grad, expected_grad in zip(actual_grads, expected_grads):
+        norm = expected_grad.norm().clamp_min(torch.finfo(expected_grad.dtype).tiny)
+        torch.testing.assert_close(actual_grad.double() / norm, expected_grad / norm, rtol=2e-6, atol=2e-7)
 
 
 @pytest.mark.parametrize("loss_class", [GISTEmbedLoss, CachedGISTEmbedLoss])
