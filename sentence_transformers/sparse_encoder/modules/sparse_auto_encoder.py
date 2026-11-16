@@ -104,10 +104,11 @@ class SparseAutoEncoder(Module):
         return latents_pre_act
 
     def LN(self, x: torch.Tensor, eps: float = 1e-5):
+        """Normalize inputs and return the mean and stabilized scale needed to invert it."""
         mu = x.mean(dim=-1, keepdim=True)
         x = x - mu
-        std = x.std(dim=-1, keepdim=True)
-        x = x / (std + eps)
+        std = x.std(dim=-1, keepdim=True) + eps
+        x = x / std
         return x, mu, std
 
     def prepare(self, x: torch.Tensor):
@@ -159,7 +160,8 @@ class SparseAutoEncoder(Module):
         """
         Args:
             latents: autoencoder latents (shape: [batch, hidden_dim])
-            info: Normalization metadata returned by ``prepare``, containing ``mu`` and ``std``.
+            info: Normalization metadata returned by ``prepare``, containing ``mu`` and the
+                stabilized normalization denominator ``std`` (sample standard deviation plus epsilon).
                 Required when ``normalize=True`` to restore the original scale and mean. Ignored otherwise.
 
         Returns:

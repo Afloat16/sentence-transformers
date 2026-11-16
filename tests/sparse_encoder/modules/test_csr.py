@@ -162,7 +162,7 @@ def test_csr_auxiliary_reconstruction_bias(normalize: bool) -> None:
     embeddings = torch.tensor([[1.0, 2.0, 3.0, 4.0], [2.0, 4.0, 6.0, 8.0]], requires_grad=True)
     features = module({"sentence_embedding": embeddings})
     if normalize:
-        expected_aux = module.pre_bias * embeddings.std(dim=-1, keepdim=True)
+        expected_aux = module.pre_bias * (embeddings.std(dim=-1, keepdim=True) + 1e-5)
         expected_residual = embeddings - embeddings.mean(dim=-1, keepdim=True).detach()
     else:
         expected_aux = module.pre_bias.expand_as(embeddings)
