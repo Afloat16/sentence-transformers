@@ -53,6 +53,30 @@ def test_contrastive_loss_does_not_warn_for_binary_labels() -> None:
     assert torch.isfinite(value)
 
 
+@pytest.mark.parametrize("label_dtype", [torch.bool, torch.uint8, torch.int64, torch.float32, torch.float64])
+@pytest.mark.parametrize("size_average", [False, True])
+def test_contrastive_binary_label_dtypes(label_dtype, size_average):
+    embeddings = torch.tensor([[0.7], [0.2]], dtype=torch.float64, requires_grad=True)
+    loss = ContrastiveLoss(
+        _EchoModel(),
+        distance_metric=lambda a, b: (a - b).abs().flatten(),
+        margin=1.0,
+        size_average=size_average,
+    )
+    value = loss(
+        [
+            {"sentence_embedding": embeddings},
+            {"sentence_embedding": torch.zeros_like(embeddings)},
+        ],
+        torch.tensor([True, False], dtype=label_dtype),
+    )
+
+    divisor = 2 if size_average else 1
+    torch.testing.assert_close(value, torch.tensor(0.5 * (0.7**2 + 0.8**2) / divisor, dtype=torch.float64))
+    gradient = torch.autograd.grad(value, embeddings)[0].flatten()
+    torch.testing.assert_close(gradient, torch.tensor([0.7, -0.8], dtype=torch.float64) / divisor)
+
+
 def test_contrastive_loss_only_checks_the_first_batch() -> None:
     # The label check runs once, on the first forward, to avoid a per-step device sync. Non-binary
     # labels that first appear in a later batch are therefore not flagged (labels are fixed per run).

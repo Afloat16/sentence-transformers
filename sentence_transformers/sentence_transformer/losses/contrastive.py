@@ -31,6 +31,7 @@ class ContrastiveLoss(nn.Module):
         """
         Contrastive loss. Expects as input two texts and a label of either 0 or 1. If the label == 1, then the distance between the
         two embeddings is reduced. If the label == 0, then the distance between the embeddings is increased.
+        Boolean labels use True for positive pairs and False for negative pairs.
 
         Args:
             model: SentenceTransformer model
@@ -121,9 +122,9 @@ class ContrastiveLoss(nn.Module):
         assert len(embeddings) == 2
         rep_anchor, rep_other = embeddings
         distances = self.distance_metric(rep_anchor, rep_other)
-        losses = 0.5 * (
-            labels.float() * distances.pow(2) + (1 - labels).float() * F.relu(self.margin - distances).pow(2)
-        )
+        # Convert before subtraction: datasets may retain binary labels as booleans.
+        labels = labels.float()
+        losses = 0.5 * (labels * distances.pow(2) + (1 - labels) * F.relu(self.margin - distances).pow(2))
         return losses.mean() if self.size_average else losses.sum()
 
     @property

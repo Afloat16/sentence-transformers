@@ -26,7 +26,12 @@ from sentence_transformers import (
 )
 from sentence_transformers.base.modules import Normalize, Router
 from sentence_transformers.base.training_args import MultiDatasetBatchSamplers
-from sentence_transformers.sentence_transformer.losses import CosineSimilarityLoss, MSELoss, SoftmaxLoss
+from sentence_transformers.sentence_transformer.losses import (
+    ContrastiveLoss,
+    CosineSimilarityLoss,
+    MSELoss,
+    SoftmaxLoss,
+)
 from sentence_transformers.sentence_transformer.modules import StaticEmbedding
 from sentence_transformers.util import is_training_available
 
@@ -403,6 +408,42 @@ def loss_training_model() -> SentenceTransformer:
     model = SentenceTransformer(modules=[StaticEmbedding(tokenizer, embedding_weights=weights)], device="cpu")
     model.model_card_data.generate_widget_examples = False
     return model
+
+
+def test_contrastive_training_with_boolean_labels(loss_training_model, tmp_path):
+    trained_weights = []
+    for label_type in (int, bool):
+        model = deepcopy(loss_training_model)
+        dataset = Dataset.from_dict(
+            {
+                "anchor": ["hello", "hello world", "hello", "world"],
+                "other": ["hello world", "world hello", "world", "hello"],
+                "label": [label_type(label) for label in [1, 1, 0, 0]],
+            }
+        )
+        trainer = SentenceTransformerTrainer(
+            model=model,
+            loss=ContrastiveLoss(model),
+            train_dataset=dataset,
+            args=SentenceTransformerTrainingArguments(
+                output_dir=str(tmp_path / label_type.__name__),
+                use_cpu=True,
+                max_steps=1,
+                per_device_train_batch_size=4,
+                learning_rate=0.1,
+                optim="sgd",
+                save_strategy="no",
+                report_to=[],
+                disable_tqdm=True,
+            ),
+        )
+
+        assert trainer.train().global_step == 1
+        weights = next(model.parameters()).detach().clone()
+        assert not torch.equal(weights, next(loss_training_model.parameters()))
+        trained_weights.append(weights)
+
+    torch.testing.assert_close(*trained_weights)
 
 
 def test_embedding_distillation_with_tensor_formatted_labels(loss_training_model, tmp_path):
