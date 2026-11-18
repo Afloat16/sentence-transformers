@@ -171,42 +171,50 @@ class EmbedDistillLoss(nn.Module):
             )
 
         embeddings = embed_columns(self.model, sentence_features)
+        teacher_embeddings = self._prepare_teacher_embeddings(labels, len(embeddings))
+        return self.compute_loss_from_embeddings(embeddings, teacher_embeddings)
 
+    def _prepare_teacher_embeddings(self, labels: Tensor, num_columns: int) -> list[Tensor]:
+        """Detach labels and split their input-column dimension, preserving the complete batch."""
         labels = labels.detach()
         if labels.dim() == 2:
             # Same teacher embedding targeted by every input column (broadcast).
-            teacher_embeddings = [labels for _ in embeddings]
-        elif labels.dim() == 3:
-            num_columns = labels.size(1)
-            if num_columns != len(embeddings):
+            return [labels for _ in range(num_columns)]
+        if labels.dim() == 3:
+            label_columns = labels.size(1)
+            if label_columns != num_columns:
                 raise ValueError(
-                    f"Number of label columns ({num_columns}) does not match number of input "
-                    f"text columns ({len(embeddings)}). Either pass 3D labels with shape "
-                    f"(batch_size, {len(embeddings)}, teacher_dim), or pass 2D labels of shape "
+                    f"Number of label columns ({label_columns}) does not match number of input "
+                    f"text columns ({num_columns}). Either pass 3D labels with shape "
+                    f"(batch_size, {num_columns}, teacher_dim), or pass 2D labels of shape "
                     f"(batch_size, teacher_dim) to broadcast a single label across all columns."
                 )
-            teacher_embeddings = [labels[:, i] for i in range(num_columns)]
-        else:
-            raise ValueError(
-                f"Expected labels to be 2D (batch_size, teacher_dim) or "
-                f"3D (batch_size, num_columns, teacher_dim); got {labels.dim()}D."
-            )
+            return [labels[:, i] for i in range(label_columns)]
+        raise ValueError(
+            f"Expected labels to be 2D (batch_size, teacher_dim) or "
+            f"3D (batch_size, num_columns, teacher_dim); got {labels.dim()}D."
+        )
 
-        return self.compute_loss_from_embeddings(embeddings, teacher_embeddings)
-
-    def compute_loss_from_embeddings(self, embeddings: list[Tensor], teacher_embeddings: list[Tensor]) -> Tensor:
-        """Compute the embedding-distillation loss from already-computed embedding lists.
+    def compute_loss_from_embeddings(
+        self, embeddings: list[Tensor], teacher_embeddings: list[Tensor] | Tensor
+    ) -> Tensor:
+        """Compute the embedding-distillation loss from already-computed student embeddings.
 
         Exposed so subclasses (or callers composing this with another loss) can reuse the
         per-metric reduction without re-deriving teacher embeddings.
 
         Args:
             embeddings: One student embedding tensor per input text column.
-            teacher_embeddings: One teacher embedding tensor per input text column.
+            teacher_embeddings: One teacher embedding tensor per input text column, or
+                a label tensor with shape ``(batch_size, teacher_dim)`` to share targets
+                across columns or ``(batch_size, num_columns, teacher_dim)`` to provide
+                separate targets for each column. Label tensors are detached.
 
         Returns:
             Scalar loss: the mean of the per-column distance losses.
         """
+        if isinstance(teacher_embeddings, Tensor):
+            teacher_embeddings = self._prepare_teacher_embeddings(teacher_embeddings, len(embeddings))
         losses = []
         for student_emb, teacher_emb in zip(embeddings, teacher_embeddings):
             dtype = self.projection.weight.dtype if self.projection is not None else student_emb.dtype
