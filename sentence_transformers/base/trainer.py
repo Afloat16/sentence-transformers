@@ -320,8 +320,12 @@ class BaseTrainer(Trainer, ABC):
         if loss is None:
             loss = self.get_default_loss(self.model)
 
+        # Keep factories so each model initialization gets fresh loss-owned parameters too.
+        self._loss_init = loss.copy() if isinstance(loss, dict) else loss
         if isinstance(loss, dict):
-            self.loss = {dataset_name: self.prepare_loss(loss_fn, model) for dataset_name, loss_fn in loss.items()}
+            self.loss = {
+                dataset_name: self.prepare_loss(loss_fn, self.model) for dataset_name, loss_fn in loss.items()
+            }
             for dataset_name, dataset in zip(["train", "eval"], [train_dataset, eval_dataset]):
                 if dataset is None:
                     continue
@@ -335,7 +339,7 @@ class BaseTrainer(Trainer, ABC):
                         f"Currently, {sorted(missing)} occur{'s' if len(missing) == 1 else ''} in `{dataset_name}_dataset` but not in `loss`."
                     )
         else:
-            self.loss = self.prepare_loss(loss, model)
+            self.loss = self.prepare_loss(loss, self.model)
 
         # If evaluator is a list, we wrap it in a SequentialEvaluator
         if evaluator is not None and not isinstance(evaluator, BaseEvaluator):
@@ -418,19 +422,23 @@ class BaseTrainer(Trainer, ABC):
         if not hasattr(self, "loss"):
             return model
 
+        # Place the new model before factories allocate their own parameters on its device.
+        if self.place_model_on_device:
+            self._move_model_to_device(model, self.args.device)
+
         # Multi-loss training:
         if isinstance(self.loss, dict):
             for key, loss_fn in self.loss.items():
-                # If a loss function is not yet initialized, we initialize it here
-                if not isinstance(loss_fn, torch.nn.Module):
-                    self.loss[key] = loss_fn(model)
+                # Re-run factories rather than keeping learned parameters from the previous model.
+                if not isinstance(self._loss_init[key], torch.nn.Module):
+                    self.loss[key] = self.prepare_loss(self._loss_init[key], model)
                 # Otherwise, we override the original model with the updated model in the loss function
                 elif hasattr(loss_fn, "model"):
                     self.loss[key] = self.override_model_in_loss(loss_fn, model)
 
         # Loss is a function accepting a model as an argument
-        elif not isinstance(self.loss, torch.nn.Module):
-            self.loss = self.loss(model)
+        elif not isinstance(self._loss_init, torch.nn.Module):
+            self.loss = self.prepare_loss(self._loss_init, model)
 
         # Loss is an initialized torch.nn.Module
         elif hasattr(self.loss, "model"):

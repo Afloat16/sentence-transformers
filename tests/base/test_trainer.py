@@ -405,6 +405,75 @@ def loss_training_model() -> SentenceTransformer:
     return model
 
 
+@pytest.mark.parametrize("as_dict", [False, True])
+def test_loss_factory_reinitializes_between_training_runs(loss_training_model, tmp_path, as_dict):
+    created_losses = []
+
+    def loss_init(model):
+        loss = SoftmaxLoss(model, model.get_embedding_dimension(), num_labels=3)
+        torch.nn.init.constant_(loss.classifier.weight, 0.1)
+        torch.nn.init.zeros_(loss.classifier.bias)
+        created_losses.append(loss)
+        return loss
+
+    persistent_loss = SoftmaxLoss(loss_training_model, 8, num_labels=3)
+    dataset = Dataset.from_dict({"a": ["hello"] * 4, "b": ["world"] * 4, "label": [1] * 4})
+    trainer = SentenceTransformerTrainer(
+        model_init=lambda: deepcopy(loss_training_model),
+        loss={"classification": loss_init, "persistent": persistent_loss} if as_dict else loss_init,
+        train_dataset=DatasetDict({"classification": dataset}) if as_dict else dataset,
+        args=SentenceTransformerTrainingArguments(
+            output_dir=str(tmp_path),
+            use_cpu=True,
+            max_steps=1,
+            per_device_train_batch_size=2,
+            learning_rate=0.01,
+            save_strategy="no",
+            report_to=[],
+            disable_tqdm=True,
+        ),
+    )
+
+    trainer.train()
+    first_loss = trainer.loss["classification"] if as_dict else trainer.loss
+    first_weights = first_loss.classifier.weight.detach().clone()
+    assert not torch.equal(first_weights, torch.full_like(first_weights, 0.1))
+
+    trainer.train()
+    second_loss = trainer.loss["classification"] if as_dict else trainer.loss
+    assert second_loss is not first_loss
+    assert second_loss.model is trainer.model
+    # Identical seeds and training data must reproduce the first run, not continue its classifier.
+    torch.testing.assert_close(second_loss.classifier.weight, first_weights)
+    torch.testing.assert_close(first_loss.classifier.weight, first_weights)
+    assert created_losses[-1] is second_loss
+    if as_dict:
+        assert trainer.loss["persistent"] is persistent_loss
+        assert persistent_loss.model is trainer.model
+
+
+def test_loss_factory_uses_reinitialized_model_dimension(loss_training_model, tmp_path):
+    def model_init(trial=None):
+        model = deepcopy(loss_training_model)
+        if trial is not None:
+            model[0] = StaticEmbedding(model[0].tokenizer, embedding_dim=trial)
+        return model
+
+    trainer = SentenceTransformerTrainer(
+        model_init=model_init,
+        loss=lambda model: SoftmaxLoss(model, model.get_embedding_dimension(), num_labels=3),
+        args=SentenceTransformerTrainingArguments(output_dir=str(tmp_path), use_cpu=True, report_to=[]),
+    )
+    assert trainer.loss.model is trainer.model
+    model = trainer.call_model_init(4)
+    features = [model.preprocess([text]) for text in ["hello", "world"]]
+    loss = trainer.loss(features, torch.tensor([1]))
+    loss.backward()
+    assert torch.isfinite(loss)
+    assert trainer.loss.classifier.in_features == 12
+    assert trainer.loss.classifier.weight.grad is not None
+
+
 def test_embedding_distillation_with_tensor_formatted_labels(loss_training_model, tmp_path):
     model = loss_training_model
     texts = ["hello", "world", "hello world", "world hello"]
