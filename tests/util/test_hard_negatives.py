@@ -1894,6 +1894,7 @@ class ControlledNegativeScoreModel:
 
     device = torch.device("cpu")
     model_card_data = SimpleNamespace(base_model="controlled-negative-score-model")
+    similarity_fn_name = "dot"
 
     def __init__(self) -> None:
         self.embeddings = {

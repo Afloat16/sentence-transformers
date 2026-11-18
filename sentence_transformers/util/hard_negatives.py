@@ -252,8 +252,8 @@ def mine_hard_negatives(
         cache_folder (str, optional): Directory path for caching embeddings. If provided, the function will save
             ``query_embeddings_{hash}.npy`` and ``corpus_embeddings_{hash}.npy`` under this folder after the first run,
             and on subsequent calls will load from these files if they exist to avoid recomputation. The hashes are
-            computed based on the model name, the query/corpus prompts, and the queries/corpus, so changing the prompt
-            arguments invalidates the cache rather than silently returning embeddings from a different prompt.
+            computed based on the model name, the query/corpus prompts, normalization, and the queries/corpus, so changing
+            the prompt arguments or switching between dot and cosine similarity invalidates the relevant cache.
             Defaults to None.
         as_triplets (bool, optional): Deprecated. Use `output_format` instead. Defaults to None.
         margin (float, optional): Deprecated. Use `absolute_margin` or `relative_margin` instead. Defaults to None.
@@ -444,16 +444,19 @@ def mine_hard_negatives(
     corpus_embeddings = None
     query_embeddings = None
 
+    # Dot-product models rely on vector magnitudes for both ranking and score-based filtering.
+    normalize_embeddings = model.similarity_fn_name != "dot"
+
     if cache_folder:
         os.makedirs(cache_folder, exist_ok=True)
 
         model_name = model.model_card_data.base_model or ""
         query_hash = hashlib.sha256(
-            repr((model_name, query_prompt, query_prompt_name, queries)).encode(),
+            repr((model_name, query_prompt, query_prompt_name, normalize_embeddings, queries)).encode(),
             usedforsecurity=False,
         ).hexdigest()
         corpus_hash = hashlib.sha256(
-            repr((model_name, corpus_prompt, corpus_prompt_name, corpus)).encode(),
+            repr((model_name, corpus_prompt, corpus_prompt_name, normalize_embeddings, corpus)).encode(),
             usedforsecurity=False,
         ).hexdigest()
 
@@ -484,7 +487,7 @@ def mine_hard_negatives(
                     corpus,
                     pool=pool,
                     batch_size=batch_size,
-                    normalize_embeddings=True,
+                    normalize_embeddings=normalize_embeddings,
                     convert_to_numpy=True,
                     show_progress_bar=True,
                     prompt_name=corpus_prompt_name,
@@ -495,7 +498,7 @@ def mine_hard_negatives(
                     queries,
                     pool=pool,
                     batch_size=batch_size,
-                    normalize_embeddings=True,
+                    normalize_embeddings=normalize_embeddings,
                     convert_to_numpy=True,
                     show_progress_bar=True,
                     prompt_name=query_prompt_name,
