@@ -121,7 +121,10 @@ class SpladePooling(Module):
 
                 if self.pooling_strategy == "max":
                     chunk_pooled = torch.max(current_chunk_transformed, dim=1)[0]
-                    pooled_scores = torch.maximum(pooled_scores, chunk_pooled)
+                    # Match an unchunked torch.max: keep the first maximum (or NaN), so
+                    # changing the memory-saving chunk size does not change tie gradients.
+                    keep_previous = (pooled_scores >= chunk_pooled) | pooled_scores.isnan()
+                    pooled_scores = torch.where(keep_previous, pooled_scores, chunk_pooled)
                 else:
                     chunk_pooled = torch.sum(current_chunk_transformed, dim=1)
                     pooled_scores += chunk_pooled
@@ -146,14 +149,14 @@ class SpladePooling(Module):
 
         # Transform per segment inside the loop: a transformed copy of the full flat logits would
         # double this module's peak memory, which is what caps the reachable batch size.
-        reduce = torch.amax if self.pooling_strategy == "max" else torch.sum
         pooled = []
         for start, end in zip(cu_seq_lens[:-1], cu_seq_lens[1:]):
             transformed = flat_logits[start:end].relu()
             transformed = transformed.log1p() if self.training else transformed.log1p_()
             if self.activation_function == "log1p_relu":
                 transformed = transformed.log1p() if self.training else transformed.log1p_()
-            pooled.append(reduce(transformed, dim=0))
+            # Use the same first-maximum gradient as padded max pooling.
+            pooled.append(transformed.max(dim=0).values if self.pooling_strategy == "max" else transformed.sum(dim=0))
         pooled_scores = torch.stack(pooled)
 
         if self.embedding_dimension is None:
