@@ -1297,40 +1297,25 @@ class BaseTrainer(Trainer, ABC):
             # Get parameters that match the pattern
             matching_params = {n: p for n, p in loss_model.named_parameters() if re.search(parameter_pattern, n)}
 
-            if matching_params:
-                # Remove matching parameters from existing optimizer groups
-                for group in optimizer_kwargs[optimizer_param_key]:
-                    if "params" in group:
-                        group["params"] = [
-                            p for p in group["params"] if all(p is not param for param in matching_params.values())
-                        ]
-            else:
+            if not matching_params:
                 raise ValueError(
                     f"No parameters found matching the pattern '{parameter_pattern}' in the model. "
                     "Please check the pattern and ensure it matches some of the model's parameters."
                 )
 
-            # Add new optimizer group with matching parameters
-            # decay_parameters = self.get_decay_parameter_names(loss_model)
-            matching_params_with_decay = {n: p for n, p in matching_params.items() if n in decay_parameters}
-            matching_params_without_decay = {n: p for n, p in matching_params.items() if n not in decay_parameters}
-
-            if matching_params_with_decay:
-                optimizer_kwargs[optimizer_param_key].append(
-                    {
-                        "params": list(matching_params_with_decay.values()),
-                        "lr": learning_rate,
-                        "weight_decay": self.args.weight_decay,
-                    }
-                )
-
-            if matching_params_without_decay:
-                optimizer_kwargs[optimizer_param_key].append(
-                    {
-                        "params": list(matching_params_without_decay.values()),
-                        "lr": learning_rate,
-                        "weight_decay": 0.0,
-                    }
-                )
+            # Split existing groups so optimizer-specific options (e.g. GaLore's rank) and
+            # weight decay survive an lr override. Later patterns can split these groups again.
+            matching_ids = {id(p) for p in matching_params.values()}
+            new_groups = []
+            for group in optimizer_kwargs[optimizer_param_key]:
+                if "params" not in group:
+                    continue
+                selected, remaining = [], []
+                for parameter in group["params"]:
+                    (selected if id(parameter) in matching_ids else remaining).append(parameter)
+                group["params"] = remaining
+                if selected:
+                    new_groups.append({**group, "params": selected, "lr": learning_rate})
+            optimizer_kwargs[optimizer_param_key].extend(new_groups)
 
         return optimizer_cls, optimizer_kwargs
