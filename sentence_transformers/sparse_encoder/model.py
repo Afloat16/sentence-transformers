@@ -812,7 +812,16 @@ class SparseEncoder(BaseModel):
             if save_to_cpu:
                 embeddings = embeddings.cpu()
 
-            all_embeddings.extend(embeddings)
+            if convert_to_sparse_tensor:
+                # Keep sparse batches intact instead of selecting every row before stacking them again.
+                all_embeddings.append(embeddings)
+            else:
+                all_embeddings.extend(embeddings)
+
+        if convert_to_sparse_tensor and all_embeddings:
+            embeddings = torch.cat(all_embeddings, dim=0)
+            indices = torch.tensor(np.argsort(length_sorted_idx), device=embeddings.device)
+            return embeddings.index_select(0, indices)
 
         all_embeddings = [all_embeddings[idx] for idx in np.argsort(length_sorted_idx)]
 
