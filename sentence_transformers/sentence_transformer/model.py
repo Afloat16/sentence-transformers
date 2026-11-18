@@ -984,9 +984,10 @@ class SentenceTransformer(BaseModel, FitMixin):
                 )
 
             if output_value == "token_embeddings":
-                embeddings = []
-                for token_emb, attention in zip(out_features[output_value], out_features["attention_mask"]):
-                    embeddings.append(token_emb[attention.bool()])
+                embeddings = [
+                    token_emb[attention.bool()]
+                    for token_emb, attention in zip(out_features[output_value], out_features["attention_mask"])
+                ]
             elif output_value is None:
                 embeddings = []
                 for idx in range(len(inputs_batch)):
@@ -1005,6 +1006,8 @@ class SentenceTransformer(BaseModel, FitMixin):
                     embeddings = embeddings.cpu()
 
             all_embeddings.extend(embeddings)
+            # Keep only the requested outputs while encoding the next batch.
+            del out_features, features
 
         all_embeddings = [all_embeddings[idx] for idx in np.argsort(length_sorted_idx)]
 

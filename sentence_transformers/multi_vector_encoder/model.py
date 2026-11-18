@@ -1017,6 +1017,8 @@ class MultiVectorEncoder(BaseModel):
                 batch_embeddings: list[Tensor] = [
                     token_embedding[mask] for token_embedding, mask in zip(token_embeddings, masks)
                 ]
+                # The unpadded outputs no longer need the full batch's intermediates.
+                del features, token_embeddings, masks
                 if normalize_embeddings:
                     batch_embeddings = [nn.functional.normalize(emb, p=2, dim=-1) for emb in batch_embeddings]
 
