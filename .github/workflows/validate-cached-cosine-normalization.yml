@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: Afloat16/sentence-transformers
-          ref: f5ea42e00c2ada0e43e056bc7353ad43022d7a18
+          ref: 2eca4afc4c35567fff16627537e43e088cd628f6
           fetch-depth: 4
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
@@ -168,7 +168,7 @@ jobs:
         run: |
           source_path=sentence_transformers/sentence_transformer/losses/cached_multiple_negatives_ranking.py
           cp "$source_path" validation-results/cached-loss-fixed.py
-          git show 76510cead8b9704d1cfbaa4c6f2613ac48c00cf4:"$source_path" > validation-results/cached-loss-base.py
+          git show 1e01a514879823c48a7b10a0c31e983ec676840e:"$source_path" > validation-results/cached-loss-base.py
           cp validation-results/cached-loss-base.py "$source_path"
           set +e
           .venv/bin/python -m pytest tests/sentence_transformer/losses/test_cached_cosine_normalization.py -k normalization_work -q --junitxml=validation-results/baseline.xml > validation-results/baseline.log 2>&1
@@ -216,7 +216,7 @@ jobs:
               summary.append(row)
           (root / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
           for row in summary:
-              print(row['case'], row['configuration'], row['base']['median_ms'], row['fixed']['median_ms'])
+              print(json.dumps({"case": row["case"], "batch": row["batch"], "dimension": row["dimension"], "mini_batch_size": row["mini_batch_size"], "dtype": row["dtype"], "configuration": row["configuration"], "base_median_ms": row["base"]["median_ms"], "fixed_median_ms": row["fixed"]["median_ms"], "base_peak_torch_bytes": statistics.median(v["additional_peak_torch_bytes"] for v in row["base"]["samples"]), "fixed_peak_torch_bytes": statistics.median(v["additional_peak_torch_bytes"] for v in row["fixed"]["samples"])}))
           PYCODE
       - name: Run complete pre-commit checks
         shell: bash
@@ -228,7 +228,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: cached-cosine-normalization-f5ea42e
+          name: cached-cosine-normalization-2eca4af
           path: validation-results/
           if-no-files-found: warn
           retention-days: 14
