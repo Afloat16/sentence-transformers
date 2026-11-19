@@ -1,0 +1,185 @@
+name: Validate binary rescoring storage
+
+on:
+  create:
+  push:
+    branches:
+      - validation-binary-rescore-storage-20261119
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validation-binary-rescore-storage-20261119
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    if: github.repository == 'Afloat16/sentence-transformers' && github.ref == 'refs/heads/validation-binary-rescore-storage-20261119'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MKL_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "1"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: Afloat16/sentence-transformers
+          ref: 83eb1a36d2fc102e9d859b3c07f7db91699ab6d9
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
+        with:
+          enable-cache: false
+      - name: Install CPU test environment
+        shell: bash
+        run: |
+          uv venv .venv
+          uv pip install --python .venv/bin/python --index-url https://download.pytorch.org/whl/cpu torch==2.15.0
+          uv pip install --python .venv/bin/python -e ".[train]" peft pillow pytest pytest-env pytest-cov pytest-xdist pytest-subtests pre-commit faiss-cpu usearch
+          mkdir -p validation-results
+          .venv/bin/python -c 'import sys,torch,transformers,sentence_transformers; print(sys.executable); print(sentence_transformers.__file__); print(torch.__version__,transformers.__version__); assert torch.version.cuda is None' | tee validation-results/environment.log
+      - name: Prepare memory probe
+        shell: bash
+        run: |
+          cat > validation-results/probe.py <<'PYCODE'
+          import gc
+          import hashlib
+          import json
+          import os
+          import statistics
+          import sys
+          import time
+          import tracemalloc
+          from pathlib import Path
+          
+          import faiss
+          import numpy as np
+          import torch
+          import usearch
+          from usearch.index import Index
+          
+          from sentence_transformers.util import quantization
+          
+          torch.set_num_threads(1)
+          faiss.omp_set_num_threads(1)
+          cpu = min(os.sched_getaffinity(0))
+          os.sched_setaffinity(0, {cpu})
+          records = []
+          for queries, documents, dimension, top_k in [(4, 64, 10, 5), (64, 1000, 128, 50), (128, 2048, 768, 100)]:
+              generator = np.random.default_rng(42)
+              corpus = generator.standard_normal((documents, dimension), dtype=np.float32)
+              inputs = generator.standard_normal((queries, dimension), dtype=np.float32)
+              packed = quantization.quantize_embeddings(corpus, "ubinary")
+              for backend in ["faiss", "usearch"]:
+                  if backend == "faiss":
+                      index = faiss.IndexBinaryFlat(packed.shape[1] * 8)
+                      index.add(packed)
+                      search = quantization.semantic_search_faiss
+                  else:
+                      index = Index(ndim=packed.shape[1] * 8, metric="hamming", dtype="b1")
+                      index.add(np.arange(documents), packed)
+                      search = quantization.semantic_search_usearch
+          
+                  def operation():
+                      return search(inputs, corpus_index=index, corpus_precision="ubinary", top_k=top_k,
+                                    rescore=True, rescore_multiplier=2, exact=True)[0]
+          
+                  operation()
+                  times = []
+                  for _ in range(3):
+                      gc.collect()
+                      started = time.process_time_ns()
+                      result = operation()
+                      times.append((time.process_time_ns() - started) / 1e6)
+                      del result
+                  gc.collect()
+                  tracemalloc.start()
+                  result = operation()
+                  _, peak = tracemalloc.get_traced_memory()
+                  tracemalloc.stop()
+                  digest = hashlib.sha256(json.dumps(result, sort_keys=True).encode()).hexdigest()
+                  records.append({"backend": backend, "queries": queries, "documents": documents,
+                                  "dimension": dimension, "top_k": top_k, "rescore_multiplier": 2,
+                                  "peak_bytes": peak, "cpu_ms": statistics.median(times),
+                                  "cpu_samples_ms": times, "output_sha256": digest})
+                  del result, index
+              del inputs, corpus, packed
+          
+          print(json.dumps({"python": sys.version, "torch": torch.__version__, "numpy": np.__version__,
+                            "faiss": faiss.__version__, "usearch": usearch.__version__, "cpu": cpu,
+                            "source": quantization.__file__,
+                            "source_sha256": hashlib.sha256(Path(quantization.__file__).read_bytes()).hexdigest(),
+                            "measurements": records}, indent=2))
+          PYCODE
+      - name: Reproduce widened binary candidates on the base revision
+        shell: bash
+        run: |
+          cp sentence_transformers/util/quantization.py validation-results/quantization-fixed.py
+          git show 4c9cdf73c8759bde17e97f6dd18e1cdf70cd9908:sentence_transformers/util/quantization.py > validation-results/quantization-base.py
+          cp validation-results/quantization-base.py sentence_transformers/util/quantization.py
+          set +e
+          .venv/bin/python -m pytest tests/util/test_quantization.py -q -ra --junitxml=validation-results/baseline.xml 2>&1 | tee validation-results/baseline.log
+          status=${PIPESTATUS[0]}
+          set -e
+          test "$status" -eq 1
+          .venv/bin/python - <<'PYCODE'
+          import xml.etree.ElementTree as ET
+          suites=list(ET.parse("validation-results/baseline.xml").iter("testsuite"))
+          assert sum(int(s.get("failures",0)) for s in suites) == 15
+          assert sum(int(s.get("errors",0)) for s in suites) == 0
+          PYCODE
+          cp validation-results/quantization-fixed.py sentence_transformers/util/quantization.py
+      - name: Validate changed quantization and optional search backends
+        shell: bash
+        run: |
+          .venv/bin/python -m pytest tests/util/test_quantization.py -q -ra --junitxml=validation-results/changed.xml 2>&1 | tee validation-results/changed.log
+      - name: Measure allocations and CPU time with alternating revisions
+        shell: bash
+        run: |
+          for sample in 0 1 2 3 4; do
+            if (( sample % 2 == 0 )); then variants="base fixed"; else variants="fixed base"; fi
+            for variant in $variants; do
+              cp "validation-results/quantization-$variant.py" sentence_transformers/util/quantization.py
+              .venv/bin/python - < validation-results/probe.py > "validation-results/$variant-$sample.json"
+            done
+          done
+          cp validation-results/quantization-fixed.py sentence_transformers/util/quantization.py
+          .venv/bin/python - <<'PYCODE'
+          import json, statistics
+          before=[json.load(open(f"validation-results/base-{i}.json")) for i in range(5)]
+          after=[json.load(open(f"validation-results/fixed-{i}.json")) for i in range(5)]
+          assert before[0]["source_sha256"] != after[0]["source_sha256"]
+          summary=[]
+          for i in range(6):
+              b=[r["measurements"][i] for r in before]
+              a=[r["measurements"][i] for r in after]
+              assert len({r["output_sha256"] for r in b+a}) == 1
+              row={k:b[0][k] for k in ["backend","queries","documents","dimension","top_k","rescore_multiplier","output_sha256"]}
+              row["before"]={k:statistics.median(r[k] for r in b) for k in ["peak_bytes","cpu_ms"]}
+              row["after"]={k:statistics.median(r[k] for r in a) for k in ["peak_bytes","cpu_ms"]}
+              if row["dimension"] >= 128:
+                  assert row["after"]["peak_bytes"] < 0.5 * row["before"]["peak_bytes"]
+              summary.append(row)
+          json.dump(summary,open("validation-results/measurements.json","w"),indent=2)
+          print(json.dumps(summary,indent=2))
+          PYCODE
+      - name: Run repository pre-commit checks
+        shell: bash
+        run: |
+          .venv/bin/pre-commit run --all-files 2>&1 | tee validation-results/pre-commit.log
+          git diff --exit-code
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: binary-rescore-storage-83eb1a3
+          path: validation-results/
+          if-no-files-found: warn
+          retention-days: 14
