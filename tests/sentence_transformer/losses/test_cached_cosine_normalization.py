@@ -16,6 +16,7 @@ from sentence_transformers.sentence_transformer.losses import (
 from sentence_transformers.sentence_transformer.losses import cached_multiple_negatives_ranking as cached_module
 from sentence_transformers.util import cos_sim
 from sentence_transformers.util import similarity as similarity_module
+from tests.utils import skip_bfloat16_cpu_crash
 
 ALL_DIRECTIONS = ("query_to_doc", "query_to_query", "doc_to_query", "doc_to_doc")
 
@@ -149,6 +150,35 @@ def test_cached_cosine_no_grad_and_custom_similarity():
             expected = MultipleNegativesRankingLoss(model, **config).compute_loss_from_embeddings(embeddings, None)
         assert not actual.requires_grad
         torch.testing.assert_close(actual, expected)
+
+
+@skip_bfloat16_cpu_crash
+def test_cached_cosine_autocast_matches_unnormalized_cache():
+    torch.manual_seed(94)
+    model = TinyEncoder()
+    reference = deepcopy(model)
+    features = [{"values": torch.randn(9, 5)} for _ in range(3)]
+    cached = CachedMultipleNegativesRankingLoss(model, mini_batch_size=2, directions=ALL_DIRECTIONS)
+
+    # A wrapper preserves the original per-chunk cos_sim path, including its
+    # promotion and autocast behavior, for an independent gradient comparison.
+    def reference_similarity(queries, candidates):
+        return cos_sim(queries, candidates)
+
+    reference_loss = CachedMultipleNegativesRankingLoss(
+        reference, mini_batch_size=2, directions=ALL_DIRECTIONS, similarity_fct=reference_similarity
+    )
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        actual = cached(features, None)
+        expected = reference_loss(features, None)
+        assert actual.dtype == expected.dtype == torch.bfloat16
+    actual.backward()
+    expected.backward()
+    torch.testing.assert_close(actual, expected, rtol=2e-2, atol=5e-3)
+    for parameter, reference_parameter in zip(model.parameters(), reference.parameters()):
+        assert parameter.grad is not None and torch.isfinite(parameter.grad).all()
+        assert torch.count_nonzero(parameter.grad) > 0
+        torch.testing.assert_close(parameter.grad, reference_parameter.grad, rtol=2e-2, atol=5e-3)
 
 
 def _distributed_cosine_worker(rank, init_method):
