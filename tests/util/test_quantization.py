@@ -628,6 +628,50 @@ def test_semantic_search_rescores_integer_query_embeddings(search_fn) -> None:
         assert sorted(entry["corpus_id"] for entry in query_results) == [0, 1, 2]
 
 
+@pytest.mark.parametrize(
+    ("search_fn", "precision"),
+    [
+        pytest.param(semantic_search_faiss, "ubinary", marks=skip_without_faiss, id="faiss-ubinary"),
+        pytest.param(semantic_search_usearch, "ubinary", marks=skip_without_usearch, id="usearch-ubinary"),
+        pytest.param(semantic_search_usearch, "binary", marks=skip_without_usearch, id="usearch-binary"),
+    ],
+)
+@pytest.mark.parametrize("query_dtype", [np.float16, np.float32, np.float64, np.int32, np.int64])
+def test_binary_rescoring_keeps_compact_candidates(search_fn, precision, query_dtype) -> None:
+    corpus = np.random.default_rng(42).standard_normal((5, 10)).astype(np.float32)
+    queries = np.array(
+        [[16384, 0.5, -16384, 0.25, 2, -4, 8, -16, 1, -0.5], [-8, 2, 4, 0.5, -1, 16, -4, 0.25, 1, -2]],
+        dtype=query_dtype,
+    )
+    # Binary rescoring is a dot product with 0/1 signs, not with the original corpus magnitudes.
+    accumulator_dtype = np.result_type(query_dtype, np.int_)
+    expected = queries.astype(accumulator_dtype) @ (corpus > 0).astype(accumulator_dtype).T
+    expected = expected.astype(np.float64)
+
+    with patch("sentence_transformers.util.quantization.np.einsum", wraps=np.einsum) as einsum:
+        results, _ = search_fn(
+            queries,
+            corpus_embeddings=quantize_embeddings(corpus, precision),
+            corpus_precision=precision,
+            top_k=8,  # Include all five documents and exercise the padding paths.
+            rescore=True,
+            rescore_multiplier=2,
+        )
+
+    for query_id, matches in enumerate(results):
+        assert sorted(match["corpus_id"] for match in matches) == list(range(len(corpus)))
+        assert [match["score"] for match in matches] == sorted([match["score"] for match in matches], reverse=True)
+        for match in matches:
+            assert match["score"] == expected[query_id, match["corpus_id"]]
+
+    rescoring_calls = [call for call in einsum.call_args_list if call.args[0] == "ij,ikj->ik"]
+    assert len(rescoring_calls) == 1
+    candidates = rescoring_calls[0].args[2]
+    # The candidate tensor scales with queries * oversampled neighbors * embedding dimension.
+    assert candidates.dtype == np.uint8
+    assert candidates.nbytes == candidates.size
+
+
 @skip_without_usearch
 @pytest.mark.parametrize("rescore", [True, False])
 def test_semantic_search_usearch_binary_matches_ubinary(rescore: bool) -> None:

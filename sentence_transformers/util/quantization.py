@@ -173,10 +173,9 @@ def semantic_search_faiss(
         # `np.packbits` padded the embedding dimension up to a whole byte, so trim those bits back off
         if corpus_precision == "ubinary":
             top_k_embeddings = np.unpackbits(top_k_embeddings, axis=-1)[..., : rescore_embeddings.shape[-1]]
-        top_k_embeddings = top_k_embeddings.astype(int)
         if corpus_precision == "uint8":
             top_k_embeddings = _dequantize_embeddings(
-                top_k_embeddings,
+                top_k_embeddings.astype(int),
                 corpus_precision,
                 ranges,
             )
@@ -186,7 +185,13 @@ def semantic_search_faiss(
         # updated_scores: [num_queries, top_k]
         # We use einsum to calculate the dot product between the query and the top_k embeddings, equivalent to looping
         # over the queries and calculating 'rescore_embeddings[i] @ top_k_embeddings[i].T'
-        rescored_scores = np.einsum("ij,ikj->ik", rescore_embeddings, top_k_embeddings).astype(np.float64, copy=False)
+        # Keep binary candidates byte-sized, preserving the accumulator dtype of the former integer cast.
+        rescored_scores = np.einsum(
+            "ij,ikj->ik",
+            rescore_embeddings,
+            top_k_embeddings,
+            dtype=np.result_type(rescore_embeddings.dtype, top_k_embeddings.dtype, np.int_),
+        ).astype(np.float64, copy=False)
         # Disqualify the padding slots so their placeholder scores cannot outrank real candidates
         rescored_scores[indices == -1] = -np.inf
         rescored_indices = np.argsort(-rescored_scores)[:, :top_k]
@@ -386,10 +391,9 @@ def semantic_search_usearch(
             top_k_embeddings = np.unpackbits(top_k_embeddings.astype(np.uint8), axis=-1)[
                 ..., : rescore_embeddings.shape[-1]
             ]
-        top_k_embeddings = top_k_embeddings.astype(int)
         if corpus_precision == "int8":
             top_k_embeddings = _dequantize_embeddings(
-                top_k_embeddings,
+                top_k_embeddings.astype(int),
                 corpus_precision,
                 ranges,
             )
@@ -399,7 +403,13 @@ def semantic_search_usearch(
         # updated_scores: [num_queries, top_k]
         # We use einsum to calculate the dot product between the query and the top_k embeddings, equivalent to looping
         # over the queries and calculating 'rescore_embeddings[i] @ top_k_embeddings[i].T'
-        rescored_scores = np.einsum("ij,ikj->ik", rescore_embeddings, top_k_embeddings).astype(np.float64, copy=False)
+        # Keep binary candidates byte-sized, preserving the accumulator dtype of the former integer cast.
+        rescored_scores = np.einsum(
+            "ij,ikj->ik",
+            rescore_embeddings,
+            top_k_embeddings,
+            dtype=np.result_type(rescore_embeddings.dtype, top_k_embeddings.dtype, np.int_),
+        ).astype(np.float64, copy=False)
         # Disqualify the padding slots so their placeholder scores cannot outrank real candidates
         rescored_scores[~valid] = -np.inf
         query_ids = np.arange(len(query_embeddings))[:, None]
