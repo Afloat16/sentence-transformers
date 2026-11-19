@@ -28,7 +28,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: Afloat16/sentence-transformers
-          ref: 83eb1a36d2fc102e9d859b3c07f7db91699ab6d9
+          ref: aab3e8bf21d89fef96c2f65ae524a376f152152b
           fetch-depth: 2
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
@@ -124,7 +124,7 @@ jobs:
         shell: bash
         run: |
           cp sentence_transformers/util/quantization.py validation-results/quantization-fixed.py
-          git show 4c9cdf73c8759bde17e97f6dd18e1cdf70cd9908:sentence_transformers/util/quantization.py > validation-results/quantization-base.py
+          git show 1e01a514879823c48a7b10a0c31e983ec676840e:sentence_transformers/util/quantization.py > validation-results/quantization-base.py
           cp validation-results/quantization-base.py sentence_transformers/util/quantization.py
           set +e
           .venv/bin/python -m pytest tests/util/test_quantization.py -q -ra --junitxml=validation-results/baseline.xml 2>&1 | tee validation-results/baseline.log
@@ -181,7 +181,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: binary-rescore-storage-83eb1a3
+          name: binary-rescore-storage-aab3e8b
           path: validation-results/
           if-no-files-found: warn
           retention-days: 14
