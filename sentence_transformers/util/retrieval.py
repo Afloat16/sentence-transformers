@@ -128,6 +128,8 @@ def paraphrase_mining_embeddings(
                 query_embeddings, embeddings[corpus_start_idx : corpus_start_idx + corpus_chunk_size]
             ).detach()
             chunk_values, chunk_idx = torch.topk(scores, min(top_k + 1, len(scores[0])), dim=1, largest=True)
+            # Only top-k candidates are needed; do not retain this dense block while scoring the next chunk.
+            del scores
             chunk_idx = chunk_idx + corpus_start_idx
 
             if scores_top_k_values is None:
@@ -244,6 +246,8 @@ def semantic_search(
             cos_scores_top_k_values, cos_scores_top_k_idx = torch.topk(
                 cos_scores, min(top_k, len(cos_scores[0])), dim=1, largest=True, sorted=False
             )
+            # Drop the full score block before the next chunk allocates another one.
+            del cos_scores
             cos_scores_top_k_values = cos_scores_top_k_values.cpu().tolist()
             cos_scores_top_k_idx = (cos_scores_top_k_idx + corpus_start_idx).cpu().tolist()
 

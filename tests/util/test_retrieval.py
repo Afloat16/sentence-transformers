@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import weakref
 from collections.abc import Callable
 
 import numpy as np
@@ -7,6 +8,7 @@ import pytest
 import torch
 
 from sentence_transformers import SentenceTransformer
+from sentence_transformers.util import retrieval
 from sentence_transformers.util.retrieval import (
     community_detection,
     paraphrase_mining,
@@ -98,6 +100,42 @@ def test_semantic_search_cos_sim_matches_generic_score_function(
         query_embeddings, corpus_embeddings, score_function=lambda a, b: cos_sim(a, b), **kwargs
     )
     assert results == expected
+
+
+@pytest.mark.parametrize("search", ["semantic", "cosine", "paraphrase"])
+@pytest.mark.parametrize("requires_grad", [False, True])
+def test_chunked_search_releases_score_storage(search: str, requires_grad: bool, monkeypatch) -> None:
+    generator = torch.Generator().manual_seed(42)
+    embeddings = torch.randn(12, 8, generator=generator, requires_grad=requires_grad)
+    score_storage = None
+    calls = 0
+
+    def score(a, b):
+        nonlocal score_storage, calls
+        # A detached tensor still owns its storage, so track storage rather than its Python tensor wrapper.
+        assert score_storage is None or score_storage() is None
+        scores = dot_score(a, b)
+        score_storage = weakref.ref(scores.untyped_storage())
+        calls += 1
+        return scores
+
+    kwargs = {"query_chunk_size": 3, "corpus_chunk_size": 4, "top_k": 2}
+    if search == "paraphrase":
+        expected = paraphrase_mining_embeddings(embeddings, score_function=dot_score, **kwargs)
+        actual = paraphrase_mining_embeddings(embeddings, score_function=score, **kwargs)
+    else:
+        scorer = cos_sim if search == "cosine" else dot_score
+        expected = semantic_search(embeddings[:6], embeddings, score_function=scorer, **kwargs)
+        if search == "cosine":
+            monkeypatch.setattr(retrieval, "dot_score", score)
+            scorer = cos_sim
+        else:
+            scorer = score
+        actual = semantic_search(embeddings[:6], embeddings, score_function=scorer, **kwargs)
+
+    assert calls > 1
+    assert score_storage() is None
+    assert actual == expected
 
 
 @pytest.mark.slow
