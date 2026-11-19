@@ -1,0 +1,173 @@
+name: Validate distributed pickle storage
+
+on:
+  create:
+  push:
+    branches:
+      - validation-distributed-pickle-20261119
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validation-distributed-pickle-20261119
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    if: github.repository == 'Afloat16/sentence-transformers' && github.ref == 'refs/heads/validation-distributed-pickle-20261119'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MKL_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "1"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: Afloat16/sentence-transformers
+          ref: f19067fff574feed4237841e5836a5fdebd31856
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
+        with:
+          enable-cache: false
+      - name: Install CPU test environment
+        shell: bash
+        run: |
+          uv venv .venv
+          uv pip install --python .venv/bin/python --index-url https://download.pytorch.org/whl/cpu torch==2.15.0
+          uv pip install --python .venv/bin/python -e ".[train]" peft pillow pytest pytest-env pytest-cov pytest-xdist pytest-subtests pre-commit
+          mkdir -p validation-results
+          .venv/bin/python -c 'import sys,torch,transformers,sentence_transformers; print(sys.executable); print(sentence_transformers.__file__); print(torch.__version__,transformers.__version__); assert torch.version.cuda is None' | tee validation-results/environment.log
+      - name: Prepare allocation probe
+        shell: bash
+        run: |
+          cat > validation-results/probe.py <<'PY'
+          import gc
+          import hashlib
+          import json
+          import statistics
+          import sys
+          import time
+          import tracemalloc
+          from types import SimpleNamespace
+          
+          import torch
+          import sentence_transformers
+          from sentence_transformers.util import distributed
+          
+          torch.set_num_threads(1)
+          records = []
+          
+          
+          def measure(name, operation):
+              operation()
+              samples = []
+              for _ in range(5):
+                  gc.collect()
+                  tracemalloc.start()
+                  start = time.process_time_ns()
+                  operation()
+                  elapsed = (time.process_time_ns() - start) / 1e6
+                  _, peak = tracemalloc.get_traced_memory()
+                  tracemalloc.stop()
+                  samples.append({"cpu_ms": elapsed, "peak_bytes": peak})
+              records.append({
+                  "scenario": name,
+                  "cpu_ms": statistics.median(s["cpu_ms"] for s in samples),
+                  "peak_bytes": statistics.median(s["peak_bytes"] for s in samples),
+                  "samples": samples,
+              })
+          
+          
+          for count in (100, 10000):
+              texts = [f"{i:08d} " + "document " * 128 for i in range(count)]
+              inference = distributed._DistributedInference(SimpleNamespace(device=torch.device("cpu")))
+              inference.world_size = 2
+              inference._scatter = lambda shards: shards[0]
+              inference._infer_and_gather = lambda payload: [([], None), ([], None)]
+          
+              def run_inputs():
+                  assert inference(texts) == []
+          
+              measure(f"input_{count}_documents", run_inputs)
+          
+          
+          captured = []
+          
+          
+          def capture(result, results, dst):
+              captured[:] = [result]
+          
+          
+          distributed.dist.gather_object = capture
+          for rows in (100, 4096):
+              output = torch.arange(rows * 768, dtype=torch.float32).reshape(rows, 768)
+              digest = hashlib.sha256(output.numpy().tobytes()).hexdigest()
+              inference = distributed._DistributedInference(SimpleNamespace(_inference=lambda inputs, **kwargs: output))
+              inference.world_size = 2
+          
+              def run_outputs():
+                  inference._infer_and_gather((["input"], {}))
+                  result, error = captured[0]
+                  assert error is None and result is output
+          
+              measure(f"output_{rows}_768d_embeddings", run_outputs)
+              assert hashlib.sha256(output.numpy().tobytes()).hexdigest() == digest
+              records[-1]["output_digest"] = digest
+          
+          print(json.dumps({
+              "python": sys.version,
+              "executable": sys.executable,
+              "module": sentence_transformers.__file__,
+              "source_sha256": hashlib.sha256(open(distributed.__file__, "rb").read()).hexdigest(),
+              "torch": torch.__version__,
+              "measurements": records,
+          }, indent=2))
+          PY
+      - name: Validate upstream behavior and measure baseline
+        shell: bash
+        run: |
+          cp sentence_transformers/util/distributed.py validation-results/distributed-fixed.py
+          git show 4c9cdf73c8759bde17e97f6dd18e1cdf70cd9908:sentence_transformers/util/distributed.py > sentence_transformers/util/distributed.py
+          .venv/bin/python -m pytest tests/base/test_distributed_evaluation.py -q -ra --junitxml=validation-results/baseline.xml 2>&1 | tee validation-results/baseline.log
+          .venv/bin/python - < validation-results/probe.py > validation-results/baseline-measurements.json
+          mv validation-results/distributed-fixed.py sentence_transformers/util/distributed.py
+      - name: Validate changed behavior and measure allocations
+        shell: bash
+        run: |
+          .venv/bin/python -m pytest tests/base/test_distributed_evaluation.py -q -ra --junitxml=validation-results/changed.xml 2>&1 | tee validation-results/changed.log
+          .venv/bin/python - < validation-results/probe.py > validation-results/changed-measurements.json
+          .venv/bin/python - <<'PY'
+          import json
+          b=json.load(open("validation-results/baseline-measurements.json"))
+          c=json.load(open("validation-results/changed-measurements.json"))
+          assert b["source_sha256"] != c["source_sha256"]
+          for x,y in zip(b["measurements"],c["measurements"]):
+              assert x["scenario"] == y["scenario"]
+              assert x.get("output_digest") == y.get("output_digest")
+              print(x["scenario"],"peak",x["peak_bytes"],"->",y["peak_bytes"],"CPU ms",x["cpu_ms"],"->",y["cpu_ms"])
+              if x["scenario"] == "input_10000_documents":
+                  assert y["peak_bytes"] < x["peak_bytes"] * 0.25
+              elif x["scenario"] == "output_4096_768d_embeddings":
+                  assert y["peak_bytes"] < x["peak_bytes"] * 0.8
+          PY
+      - name: Run repository pre-commit checks
+        shell: bash
+        run: |
+          .venv/bin/pre-commit run --all-files 2>&1 | tee validation-results/pre-commit.log
+          git diff --exit-code
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: distributed-pickle-f19067f
+          path: validation-results/
+          if-no-files-found: warn
+          retention-days: 14
