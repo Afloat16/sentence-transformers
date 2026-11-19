@@ -177,7 +177,7 @@ jobs:
           cp validation-results/cached-loss-fixed.py "$source_path"
           cat validation-results/baseline.log
           test "$baseline_status" = 1
-          rg '8 failed' validation-results/baseline.log
+          .venv/bin/python -c "from pathlib import Path; assert '8 failed' in Path('validation-results/baseline.log').read_text()"
       - name: Test loss, gradients, replay, and actual distributed gathering
         shell: bash
         run: |
