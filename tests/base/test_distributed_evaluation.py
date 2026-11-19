@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -12,7 +14,41 @@ from sentence_transformers import CrossEncoder, MultiVectorEncoder, SentenceTran
 from sentence_transformers.base.modules import Dense
 from sentence_transformers.sentence_transformer.modules import Pooling, WordEmbeddings
 from sentence_transformers.sentence_transformer.modules.tokenizer import WhitespaceTokenizer
-from sentence_transformers.util.distributed import distributed_evaluation
+from sentence_transformers.util.distributed import _DistributedInference, distributed_evaluation
+
+
+class UnpicklableValue:
+    def __reduce__(self):
+        raise ValueError("cannot serialize test value")
+
+
+def test_unpicklable_later_shard_falls_back_before_collectives(monkeypatch):
+    monkeypatch.setattr("sentence_transformers.util.distributed.get_rank", lambda: 0)
+    monkeypatch.setattr("sentence_transformers.util.distributed.get_world_size", lambda: 2)
+    model = SimpleNamespace(_inference=Mock(return_value="local result"))
+    inference = _DistributedInference(model)
+    inference._scatter = Mock(side_effect=AssertionError("must validate all shards before scattering"))
+    inputs = ["first shard", {"nested": UnpicklableValue()}]
+
+    assert inference(inputs) == "local result"
+
+    model._inference.assert_called_once_with(inputs, show_progress_bar=False)
+    inference._scatter.assert_not_called()
+
+
+def test_unpicklable_inference_result_is_gathered_as_an_error(monkeypatch):
+    monkeypatch.setattr("sentence_transformers.util.distributed.get_rank", lambda: 0)
+    monkeypatch.setattr("sentence_transformers.util.distributed.get_world_size", lambda: 2)
+    gather = Mock()
+    monkeypatch.setattr(dist, "gather_object", gather)
+    model = SimpleNamespace(_inference=Mock(return_value={"nested": UnpicklableValue()}))
+
+    _DistributedInference(model)._infer_and_gather((["input"], {}))
+
+    (output, error), _ = gather.call_args.args
+    assert output is None
+    assert "cannot serialize test value" in error
+    assert "__reduce__" in error
 
 
 class RecordingWordEmbeddings(WordEmbeddings):

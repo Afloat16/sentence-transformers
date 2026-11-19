@@ -21,6 +21,16 @@ if TYPE_CHECKING:
 logger = logging.get_logger(__name__)
 
 
+class _PickleSink:
+    def write(self, data: bytes) -> int:
+        return len(data)
+
+
+def _validate_picklable(value: Any) -> None:
+    """Check the complete payload without keeping an extra serialized copy in memory."""
+    pickle.Pickler(_PickleSink()).dump(value)
+
+
 def get_rank() -> int:
     """The rank of the current process in the distributed group, or ``0`` when not distributed."""
     if is_dist_initialized():
@@ -138,7 +148,7 @@ class _DistributedInference:
             end = start + size + (rank < remainder)
             shards.append(("infer", (inputs[start:end], kwargs)))
         try:
-            pickle.dumps(shards)
+            _validate_picklable(shards)
         except Exception:
             return self.model._inference(inputs, **kwargs)
         _, payload = self._scatter(shards)
@@ -171,7 +181,7 @@ class _DistributedInference:
         try:
             output = _move_tensors_to_cpu(self.model._inference(inputs, **kwargs)) if inputs else None
             result = (output, None)
-            pickle.dumps(result)
+            _validate_picklable(result)
         except Exception:
             result = (None, traceback.format_exc())
         results = [None] * self.world_size if self.rank == 0 else None
