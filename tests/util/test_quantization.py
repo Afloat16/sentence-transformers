@@ -230,9 +230,52 @@ def test_quantize_multi_vector_calibrates_once(precision: str, calibration_sourc
     assert isinstance(actual, list)
     assert [matrix.shape for matrix in actual] == [matrix.shape for matrix in matrices]
     np.testing.assert_array_equal(np.concatenate(actual), expected)
-    expected_scans = 0 if calibration_source == "ranges" else 1
-    assert minimum.call_count == expected_scans
-    assert maximum.call_count == expected_scans
+    for reduction in (minimum, maximum):
+        scanned_rows = [call.args[0].shape[0] for call in reduction.call_args_list]
+        if calibration_source == "ranges":
+            assert not scanned_rows
+        elif calibration_source == "calibration_embeddings":
+            assert scanned_rows == [len(calibration)]
+        else:
+            assert sum(scanned_rows) == len(combined)
+            assert max(scanned_rows) <= max(map(len, matrices))
+
+
+@pytest.mark.parametrize("precision", ["int8", "uint8"])
+def test_quantize_multi_vector_mixed_dtypes_preserve_global_ranges(precision: str) -> None:
+    matrices = [
+        np.empty((0, 3), dtype=np.float64),
+        np.array([[-3, 5, 1], [1, 5, 2]], dtype=np.float16),
+        np.array([[4, 5, -2]], dtype=np.float64),
+        np.array([[-2, 5, 7]], dtype=np.float32),
+    ]
+    originals = [matrix.copy() for matrix in matrices]
+    combined = np.concatenate(matrices)
+    ranges = np.vstack((combined.min(axis=0), combined.max(axis=0)))
+    expected = [quantize_embeddings(matrix, precision, ranges=ranges) for matrix in matrices]
+
+    actual = quantize_embeddings(matrices, precision)
+
+    np.testing.assert_array_equal(np.concatenate(actual), np.concatenate(expected))
+    for matrix, original in zip(matrices, originals):
+        np.testing.assert_array_equal(matrix, original)
+
+
+@pytest.mark.parametrize("count", [99, 100])
+def test_quantize_multi_vector_calibration_warning_counts_tokens(count: int, caplog: pytest.LogCaptureFixture) -> None:
+    matrices = [np.zeros((count // 2, 4), dtype=np.float32), np.ones((count - count // 2, 4), dtype=np.float32)]
+    quantize_embeddings(matrices, "uint8")
+    if count < 100:
+        assert "based on 99 embeddings" in caplog.text
+    else:
+        assert "quantization buckets" not in caplog.text
+
+
+@pytest.mark.parametrize("lengths", [(2, 3), (0, 3), (0, 0)])
+def test_quantize_multi_vector_calibration_rejects_mismatched_dimensions(lengths: tuple[int, int]) -> None:
+    matrices = [np.zeros((lengths[0], 4), dtype=np.float32), np.zeros((lengths[1], 5), dtype=np.float32)]
+    with pytest.raises(ValueError):
+        quantize_embeddings(matrices, "uint8")
 
 
 skip_without_faiss = pytest.mark.skipif(importlib.util.find_spec("faiss") is None, reason="faiss not installed")

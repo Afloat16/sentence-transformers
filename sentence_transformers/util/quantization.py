@@ -429,25 +429,36 @@ def semantic_search_usearch(
 
 
 def _get_quantization_ranges(
-    embeddings: np.ndarray,
+    embeddings: np.ndarray | list[np.ndarray],
     precision: Literal["int8", "uint8"],
     calibration_embeddings: np.ndarray | None,
 ) -> np.ndarray:
     if calibration_embeddings is None:
-        if embeddings.ndim == 1 or embeddings.shape[0] == 1:
+        num_embeddings = sum(len(matrix) for matrix in embeddings) if isinstance(embeddings, list) else len(embeddings)
+        if num_embeddings == 1 or (isinstance(embeddings, np.ndarray) and embeddings.ndim == 1):
             raise ValueError(
                 f"Cannot compute {precision} quantization ranges from a single embedding. "
                 "Call `quantize_embeddings` with `ranges` or `calibration_embeddings` "
                 "from a representative set of embeddings instead."
             )
-        if embeddings.shape[0] < 100:
+        if num_embeddings < 100:
             logger.warning(
-                f"Computing {precision} quantization buckets based on {len(embeddings)} embeddings."
+                f"Computing {precision} quantization buckets based on {num_embeddings} embeddings."
                 f" {precision} quantization is more stable with `ranges` calculated from more embeddings "
                 "or a `calibration_embeddings` that can be used to calculate the buckets."
             )
-        calibration_embeddings = embeddings
-    return np.vstack((np.min(calibration_embeddings, axis=0), np.max(calibration_embeddings, axis=0)))
+    calibration_data = embeddings if calibration_embeddings is None else calibration_embeddings
+    if isinstance(calibration_data, list):
+        # Reduce one document at a time instead of copying every token vector
+        # into a second, corpus-sized matrix just to determine its extrema.
+        matrices = (matrix for matrix in calibration_data if len(matrix))
+        first = next(matrices)
+        minimum, maximum = np.min(first, axis=0), np.max(first, axis=0)
+        for matrix in matrices:
+            minimum = np.minimum(minimum, np.min(matrix, axis=0))
+            maximum = np.maximum(maximum, np.max(matrix, axis=0))
+        return np.vstack((minimum, maximum))
+    return np.vstack((np.min(calibration_data, axis=0), np.max(calibration_data, axis=0)))
 
 
 def _dequantize_embeddings(
@@ -513,11 +524,17 @@ def quantize_embeddings(
         if isinstance(embeddings[0], np.ndarray) and embeddings[0].ndim == 2:
             # Calibrate once so all documents use the same ranges.
             if precision.endswith("int8") and ranges is None:
-                calibration_data = (
-                    np.concatenate(embeddings, axis=0) if calibration_embeddings is None else calibration_embeddings
+                if calibration_embeddings is None and any(
+                    matrix.shape[1:] != embeddings[0].shape[1:] for matrix in embeddings
+                ):
+                    raise ValueError("All multi-vector embeddings must have the same dimensions for calibration.")
+                has_calibration = (
+                    any(len(matrix) for matrix in embeddings)
+                    if calibration_embeddings is None
+                    else len(calibration_embeddings) > 0
                 )
-                if len(calibration_data):
-                    ranges = _get_quantization_ranges(calibration_data, precision, calibration_embeddings)
+                if has_calibration:
+                    ranges = _get_quantization_ranges(embeddings, precision, calibration_embeddings)
             return [
                 quantize_embeddings(
                     matrix, precision=precision, ranges=ranges, calibration_embeddings=calibration_embeddings
