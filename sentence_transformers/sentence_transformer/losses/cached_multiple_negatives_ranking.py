@@ -28,7 +28,6 @@ from sentence_transformers.util import (
     normalize_embeddings,
     similarity_fct_name,
 )
-from sentence_transformers.util.tensor import _convert_to_float_tensor
 
 
 class CachedMultipleNegativesRankingLoss(CachedLossMixin, nn.Module):
@@ -280,10 +279,16 @@ class CachedMultipleNegativesRankingLoss(CachedLossMixin, nn.Module):
 
         similarity_fct = self.similarity_fct
         normalization_graph: list[tuple[Tensor, Tensor]] = []
-        if similarity_fct is cos_sim and batch_size > self.mini_batch_size:
-            # Candidate rows are shared by every score chunk. Normalize them once, retaining
-            # cos_sim's float32 promotion for low-precision embeddings.
-            normalized = [normalize_embeddings(_convert_to_float_tensor(x)) for x in (queries, docs_all)]
+        if (
+            similarity_fct is cos_sim
+            and batch_size > self.mini_batch_size
+            and queries.dtype in (torch.float32, torch.float64)
+            and docs_all.dtype == queries.dtype
+        ):
+            # Candidate rows are shared by every score chunk. Normalize them once.
+            # Keep low-precision embeddings on the original path: accumulating their
+            # gradients before casting back would change per-chunk rounding.
+            normalized = [normalize_embeddings(x) for x in (queries, docs_all)]
             if with_backward:
                 # Each chunk frees its score graph. Accumulate on detached normalized leaves,
                 # then propagate their combined gradients through normalization once below.

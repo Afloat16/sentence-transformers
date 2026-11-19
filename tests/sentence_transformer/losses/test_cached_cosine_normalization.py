@@ -22,15 +22,19 @@ ALL_DIRECTIONS = ("query_to_doc", "query_to_query", "doc_to_query", "doc_to_doc"
 
 
 class TinyEncoder(nn.Module):
-    def __init__(self):
+    def __init__(self, output_dtype=None):
         super().__init__()
         self.linear = nn.Linear(5, 7)
+        self.output_dtype = output_dtype
 
     def __getitem__(self, index):
         return self.linear
 
     def forward(self, features):
-        return {"sentence_embedding": self.linear(features["values"])}
+        embeddings = self.linear(features["values"])
+        if self.output_dtype is not None:
+            embeddings = embeddings.to(self.output_dtype)
+        return {"sentence_embedding": embeddings}
 
 
 def _embeddings(dtype=torch.float32, rank=0):
@@ -153,9 +157,10 @@ def test_cached_cosine_no_grad_and_custom_similarity():
 
 
 @skip_bfloat16_cpu_crash
-def test_cached_cosine_autocast_matches_unnormalized_cache():
+@pytest.mark.parametrize("output_dtype", [None, torch.float32])
+def test_cached_cosine_autocast_matches_unnormalized_cache(output_dtype):
     torch.manual_seed(94)
-    model = TinyEncoder()
+    model = TinyEncoder(output_dtype)
     reference = deepcopy(model)
     features = [{"values": torch.randn(9, 5)} for _ in range(3)]
     cached = CachedMultipleNegativesRankingLoss(model, mini_batch_size=2, directions=ALL_DIRECTIONS)
@@ -174,11 +179,12 @@ def test_cached_cosine_autocast_matches_unnormalized_cache():
         assert actual.dtype == expected.dtype == torch.bfloat16
     actual.backward()
     expected.backward()
-    torch.testing.assert_close(actual, expected, rtol=2e-2, atol=5e-3)
+    tolerance = 1e-5 if output_dtype == torch.float32 else 0
+    torch.testing.assert_close(actual, expected, rtol=tolerance, atol=tolerance)
     for parameter, reference_parameter in zip(model.parameters(), reference.parameters()):
         assert parameter.grad is not None and torch.isfinite(parameter.grad).all()
         assert torch.count_nonzero(parameter.grad) > 0
-        torch.testing.assert_close(parameter.grad, reference_parameter.grad, rtol=2e-2, atol=5e-3)
+        torch.testing.assert_close(parameter.grad, reference_parameter.grad, rtol=tolerance, atol=tolerance)
 
 
 def _distributed_cosine_worker(rank, init_method):
