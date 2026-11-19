@@ -1,0 +1,74 @@
+name: Validate optimizer group options
+on:
+  create:
+  push:
+    branches:
+      - validation/optimizer-group-options-20261119
+permissions:
+  contents: read
+concurrency:
+  group: validation-optimizer-group-options-20261119
+  cancel-in-progress: true
+jobs:
+  validate:
+    if: github.repository == 'Afloat16/sentence-transformers' && github.ref == 'refs/heads/validation/optimizer-group-options-20261119'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: Afloat16/sentence-transformers
+          ref: 5519a9971e211c0b22a7cde910809ed7ff96f53d
+          fetch-depth: 5
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
+        with:
+          enable-cache: false
+      - name: Install CPU training dependencies
+        shell: bash
+        run: |
+          uv venv .venv
+          uv pip install --python .venv/bin/python --index-url https://download.pytorch.org/whl/cpu torch==2.15.0
+          uv pip install --python .venv/bin/python -e ".[train]" galore-torch peft pillow pytest pytest-env pytest-cov pytest-xdist pytest-subtests pre-commit
+          mkdir -p validation-results
+          .venv/bin/python -c 'import sys,torch,transformers,galore_torch,sentence_transformers; print(sys.version); print(torch.__version__,transformers.__version__); print(sentence_transformers.__file__); assert torch.version.cuda is None' | tee validation-results/environment.log
+          test "$(git rev-parse HEAD)" = "5519a9971e211c0b22a7cde910809ed7ff96f53d"
+      - name: Reproduce upstream optimizer option loss
+        shell: bash
+        run: |
+          source_path=sentence_transformers/base/trainer.py
+          cp "$source_path" validation-results/trainer-fixed.py
+          git show 1e01a514879823c48a7b10a0c31e983ec676840e:"$source_path" > "$source_path"
+          set +e
+          .venv/bin/python -m pytest tests/base/test_optimizer_group_mapping.py -q -ra --junitxml=validation-results/baseline.xml > validation-results/baseline.log 2>&1
+          baseline_status=$?
+          set -e
+          cp validation-results/trainer-fixed.py "$source_path"
+          cat validation-results/baseline.log
+          test "$baseline_status" = 1
+          .venv/bin/python -c "from pathlib import Path; text=Path('validation-results/baseline.log').read_text(); assert '4 failed, 1 passed' in text"
+      - name: Verify options and native GaLore training updates
+        shell: bash
+        run: |
+          .venv/bin/python -m pytest tests/base/test_optimizer_group_mapping.py tests/base/test_training_args.py -q -ra --junitxml=validation-results/fixed.xml | tee validation-results/fixed.log
+          .venv/bin/python -c "import xml.etree.ElementTree as E; r=E.parse('validation-results/fixed.xml').getroot(); suites=list(r) if r.tag=='testsuites' else [r]; assert sum(int(s.attrib.get('skipped',0)) for s in suites)==0"
+      - name: Check contribution formatting
+        shell: bash
+        run: |
+          .venv/bin/pre-commit run --files sentence_transformers/base/trainer.py tests/base/test_optimizer_group_mapping.py | tee validation-results/pre-commit.log
+          git diff --exit-code
+      - name: Upload validation evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: optimizer-group-options-5519a99
+          path: validation-results/
+          retention-days: 14
