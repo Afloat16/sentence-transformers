@@ -58,6 +58,7 @@ jobs:
           import time
           import tracemalloc
           from pathlib import Path
+          from functools import partial
           
           import faiss
           import numpy as np
@@ -84,7 +85,8 @@ jobs:
                       search = quantization.semantic_search_faiss
                   else:
                       index = Index(ndim=packed.shape[1] * 8, metric="hamming", dtype="b1")
-                      index.add(np.arange(documents), packed)
+                      index.add(np.arange(documents), packed, threads=1)
+                      index.search = partial(index.search, threads=1)
                       search = quantization.semantic_search_usearch
           
                   def operation():
