@@ -24,8 +24,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: Afloat16/sentence-transformers
-          ref: b39d5805bfb5b5e9341b51d8870c368cc8487c5b
-          fetch-depth: 3
+          ref: f5ea42e00c2ada0e43e056bc7353ad43022d7a18
+          fetch-depth: 4
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
@@ -183,7 +183,6 @@ jobs:
         run: |
           .venv/bin/python -m pytest tests/sentence_transformer/losses/test_cached_cosine_normalization.py tests/base/test_gradcache_distributed.py -q -ra --junitxml=validation-results/changed.xml | tee validation-results/changed.log
       - name: Compare complete cached training steps
-        if: false # Production hash is unchanged from run 44514158520; this gate adds autocast coverage.
         shell: bash
         run: |
           source_path=sentence_transformers/sentence_transformer/losses/cached_multiple_negatives_ranking.py
@@ -229,7 +228,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: cached-cosine-normalization-b39d580
+          name: cached-cosine-normalization-f5ea42e
           path: validation-results/
           if-no-files-found: warn
           retention-days: 14
