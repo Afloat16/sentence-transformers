@@ -1,0 +1,235 @@
+name: Validate cached cosine normalization
+on:
+  create:
+  push:
+    branches:
+      - validation-cached-cosine-normalization-20261119
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: validation-cached-cosine-normalization-20261119
+  cancel-in-progress: true
+jobs:
+  validate:
+    if: github.repository == 'Afloat16/sentence-transformers' && github.ref == 'refs/heads/validation-cached-cosine-normalization-20261119'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MKL_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "1"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: Afloat16/sentence-transformers
+          ref: 77c0cce35012dc726d4c4f7bcb30c03dd721ab05
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
+        with:
+          enable-cache: false
+      - name: Install CPU test environment
+        shell: bash
+        run: |
+          uv venv .venv
+          uv pip install --python .venv/bin/python --index-url https://download.pytorch.org/whl/cpu torch==2.15.0
+          uv pip install --python .venv/bin/python -e ".[train]" peft pillow pytest pytest-env pytest-cov pytest-xdist pytest-subtests pre-commit
+          mkdir -p validation-results
+          .venv/bin/python -c 'import sys,torch,transformers,sentence_transformers; print(sys.executable); print(sentence_transformers.__file__); print(torch.__version__,transformers.__version__); assert torch.version.cuda is None' | tee validation-results/environment.log
+      - name: Prepare public training benchmark
+        shell: bash
+        run: |
+          cat > validation-results/probe.py <<'PYCODE'
+          import gc
+          import hashlib
+          import importlib.util
+          import json
+          import os
+          import sys
+          import tempfile
+          import time
+          from copy import deepcopy
+          from pathlib import Path
+          
+          import torch
+          from torch import nn
+          from torch.utils.benchmark import Timer
+          
+          import sentence_transformers
+          from sentence_transformers.sentence_transformer.losses import CachedMultipleNegativesRankingLoss
+          from sentence_transformers.sentence_transformer.losses import cached_multiple_negatives_ranking as target_module
+          from sentence_transformers.util import dot_score
+          
+          assert Path(sentence_transformers.__file__).resolve().is_relative_to(Path.cwd().resolve())
+          torch.set_num_threads(1)
+          cpu = min(os.sched_getaffinity(0))
+          os.sched_setaffinity(0, {cpu})
+          warmup = torch.ones(256, 256)
+          until = time.perf_counter() + 3
+          while time.perf_counter() < until:
+              warmup @ warmup
+          del warmup
+          
+          spec = importlib.util.spec_from_file_location("baseline_cached_loss", "validation-results/cached-loss-base.py")
+          baseline = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(baseline)
+          
+          
+          class PooledEmbedding(nn.Module):
+              def __init__(self, dim, dtype):
+                  super().__init__()
+                  self.embedding = nn.Embedding(1024, dim, dtype=dtype)
+          
+              def __getitem__(self, index):
+                  return self.embedding
+          
+              def forward(self, features):
+                  return {"sentence_embedding": self.embedding(features["input_ids"]).mean(1)}
+          
+          
+          cases = [
+              (32, 128, 32, torch.float32, "default"),
+              (32, 128, 16, torch.float32, "default"),
+              (129, 64, 32, torch.float32, "default"),
+              (512, 768, 32, torch.float32, "default"),
+              (2048, 384, 64, torch.float32, "default"),
+              (512, 384, 32, torch.float32, "all_directions"),
+              (256, 128, 32, torch.float64, "default"),
+              (512, 384, 32, torch.float32, "dot_control"),
+          ]
+          records = []
+          for case_id, (batch, dim, mini_batch_size, dtype, kind) in enumerate(cases):
+              torch.manual_seed(93)
+              model = PooledEmbedding(dim, dtype)
+              features = [{"input_ids": torch.randint(1024, (batch, 8))} for _ in range(3)]
+              config = {"mini_batch_size": mini_batch_size}
+              if kind == "all_directions":
+                  config["directions"] = ("query_to_doc", "query_to_query", "doc_to_query", "doc_to_doc")
+              if kind == "dot_control":
+                  config.update(similarity_fct=dot_score, scale=1.0)
+              loss_fn = CachedMultipleNegativesRankingLoss(model, **config)
+              reference_model = deepcopy(model)
+              reference_loss = baseline.CachedMultipleNegativesRankingLoss(reference_model, **config)
+          
+              def step():
+                  model.zero_grad(set_to_none=True)
+                  result = loss_fn(features, None)
+                  result.backward()
+                  return result.detach()
+          
+              actual = step()
+              expected = reference_loss(features, None)
+              expected.backward()
+              tolerance = 1e-10 if dtype == torch.float64 else 1e-5
+              torch.testing.assert_close(actual, expected, rtol=tolerance, atol=tolerance)
+              gradient_error = 0.0
+              for parameter, reference_parameter in zip(model.parameters(), reference_model.parameters()):
+                  assert parameter.grad is not None and reference_parameter.grad is not None
+                  torch.testing.assert_close(parameter.grad, reference_parameter.grad, rtol=tolerance, atol=tolerance)
+                  gradient_error = max(gradient_error, (parameter.grad - reference_parameter.grad).abs().max().item())
+              row = {
+                  "case": case_id, "batch": batch, "dimension": dim, "mini_batch_size": mini_batch_size,
+                  "dtype": str(dtype), "configuration": kind,
+                  "loss": actual.item(), "maximum_loss_error": (actual - expected).abs().item(),
+                  "maximum_parameter_gradient_error": gradient_error,
+              }
+              del expected, actual, reference_model, reference_loss
+              measured = Timer(stmt="step()", globals={"step": step}, num_threads=1).blocked_autorange(min_run_time=0.5)
+              row.update(median_ms=measured.median * 1000, iqr_ms=measured.iqr * 1000)
+              model.zero_grad(set_to_none=True)
+              gc.collect()
+              with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU], profile_memory=True) as profile:
+                  result = step()
+              with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as trace:
+                  trace_path = trace.name
+              profile.export_chrome_trace(trace_path)
+              trace_data = json.loads(Path(trace_path).read_text())
+              Path(trace_path).unlink()
+              allocations = [event["args"] for event in trace_data["traceEvents"] if event.get("name") == "[memory]"]
+              allocations = [event for event in allocations if "Total Allocated" in event and "Bytes" in event]
+              before = allocations[0]["Total Allocated"] - allocations[0]["Bytes"]
+              row["additional_peak_torch_bytes"] = max(event["Total Allocated"] for event in allocations) - before
+              records.append(row)
+              del result, profile, model, loss_fn, features
+          
+          print(json.dumps({
+              "torch": torch.__version__, "python": sys.version, "cpu": cpu,
+              "source_sha256": hashlib.sha256(Path(target_module.__file__).read_bytes()).hexdigest(),
+              "results": records,
+          }, indent=2))
+          PYCODE
+      - name: Demonstrate repeated baseline normalization
+        shell: bash
+        run: |
+          source_path=sentence_transformers/sentence_transformer/losses/cached_multiple_negatives_ranking.py
+          cp "$source_path" validation-results/cached-loss-fixed.py
+          git show 76510cead8b9704d1cfbaa4c6f2613ac48c00cf4:"$source_path" > validation-results/cached-loss-base.py
+          cp validation-results/cached-loss-base.py "$source_path"
+          set +e
+          .venv/bin/python -m pytest tests/sentence_transformer/losses/test_cached_cosine_normalization.py -k normalization_work -q --junitxml=validation-results/baseline.xml > validation-results/baseline.log 2>&1
+          baseline_status=$?
+          set -e
+          cp validation-results/cached-loss-fixed.py "$source_path"
+          cat validation-results/baseline.log
+          test "$baseline_status" = 1
+          rg '8 failed' validation-results/baseline.log
+      - name: Test loss, gradients, replay, and actual distributed gathering
+        shell: bash
+        run: |
+          .venv/bin/python -m pytest tests/sentence_transformer/losses/test_cached_cosine_normalization.py tests/base/test_gradcache_distributed.py -q -ra --junitxml=validation-results/changed.xml | tee validation-results/changed.log
+      - name: Compare complete cached training steps
+        shell: bash
+        run: |
+          source_path=sentence_transformers/sentence_transformer/losses/cached_multiple_negatives_ranking.py
+          for sample in 0 1 2 3 4; do
+            if (( sample % 2 )); then
+              versions="fixed base"
+            else
+              versions="base fixed"
+            fi
+            for version in $versions; do
+              cp "validation-results/cached-loss-$version.py" "$source_path"
+              .venv/bin/python - < validation-results/probe.py > "validation-results/$version-$sample.json"
+            done
+          done
+          cp validation-results/cached-loss-fixed.py "$source_path"
+          .venv/bin/python - <<'PYCODE'
+          import json, statistics
+          from pathlib import Path
+          root = Path('validation-results')
+          groups = {v: [json.loads((root / f'{v}-{i}.json').read_text()) for i in range(5)] for v in ('base', 'fixed')}
+          assert len({r['source_sha256'] for r in groups['base']}) == 1
+          assert len({r['source_sha256'] for r in groups['fixed']}) == 1
+          assert groups['base'][0]['source_sha256'] != groups['fixed'][0]['source_sha256']
+          summary = []
+          for case_id in range(len(groups['base'][0]['results'])):
+              row = dict(groups['base'][0]['results'][case_id])
+              row.pop('median_ms'); row.pop('iqr_ms'); row.pop('additional_peak_torch_bytes')
+              for version in ('base', 'fixed'):
+                  values = [r['results'][case_id] for r in groups[version]]
+                  row[version] = {'median_ms': statistics.median(v['median_ms'] for v in values), 'samples': values}
+              summary.append(row)
+          (root / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
+          for row in summary:
+              print(row['case'], row['configuration'], row['base']['median_ms'], row['fixed']['median_ms'])
+          PYCODE
+      - name: Run complete pre-commit checks
+        shell: bash
+        run: |
+          rm -rf validation-results/__pycache__
+          .venv/bin/pre-commit run --all-files | tee validation-results/pre-commit.log
+          git diff --exit-code
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cached-cosine-normalization-77c0cce
+          path: validation-results/
+          if-no-files-found: warn
+          retention-days: 14
+
