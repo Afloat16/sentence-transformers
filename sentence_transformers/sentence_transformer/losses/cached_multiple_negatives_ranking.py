@@ -20,7 +20,15 @@ from sentence_transformers.sentence_transformer.losses.multiple_negatives_rankin
     MultipleNegativesRankingLoss,
 )
 from sentence_transformers.sentence_transformer.model import SentenceTransformer
-from sentence_transformers.util import all_gather_with_grad, cos_sim, get_rank, similarity_fct_name
+from sentence_transformers.util import (
+    all_gather_with_grad,
+    cos_sim,
+    dot_score,
+    get_rank,
+    normalize_embeddings,
+    similarity_fct_name,
+)
+from sentence_transformers.util.tensor import _convert_to_float_tensor
 
 
 class CachedMultipleNegativesRankingLoss(CachedLossMixin, nn.Module):
@@ -270,6 +278,22 @@ class CachedMultipleNegativesRankingLoss(CachedLossMixin, nn.Module):
         local_indices = torch.arange(offset, offset + batch_size, device=queries.device)
         num_docs = len(docs)
 
+        similarity_fct = self.similarity_fct
+        normalization_graph: list[tuple[Tensor, Tensor]] = []
+        if similarity_fct is cos_sim and batch_size > self.mini_batch_size:
+            # Candidate rows are shared by every score chunk. Normalize them once, retaining
+            # cos_sim's float32 promotion for low-precision embeddings.
+            normalized = [normalize_embeddings(_convert_to_float_tensor(x)) for x in (queries, docs_all)]
+            if with_backward:
+                # Each chunk frees its score graph. Accumulate on detached normalized leaves,
+                # then propagate their combined gradients through normalization once below.
+                detached = [x.detach().requires_grad_(x.requires_grad) for x in normalized]
+                normalization_graph = [(x, leaf) for x, leaf in zip(normalized, detached) if x.requires_grad]
+                normalized = detached
+            queries, docs_all = normalized
+            docs_pos = docs_all[:world_batch_size]
+            similarity_fct = dot_score
+
         losses: list[torch.Tensor] = []
         for begin in tqdm.trange(
             0,
@@ -293,21 +317,21 @@ class CachedMultipleNegativesRankingLoss(CachedLossMixin, nn.Module):
 
             sim_matrices = {}
             # (mbs, bs * ws * (1 + nn))
-            sim_matrices["query_to_doc"] = self.similarity_fct(local_queries, docs_all)
+            sim_matrices["query_to_doc"] = similarity_fct(local_queries, docs_all)
 
             if "query_to_query" in self.directions:
                 # (mbs, bs * ws)
-                sim_matrices["query_to_query"] = self.similarity_fct(local_queries, queries)
+                sim_matrices["query_to_query"] = similarity_fct(local_queries, queries)
                 # Remove self-similarity entries q_i -> q_i
                 sim_matrices["query_to_query"][row_indices, local_batch] = -torch.inf
 
             if "doc_to_query" in self.directions:
                 # (mbs, bs * ws)
-                sim_matrices["doc_to_query"] = self.similarity_fct(queries, local_docs).T
+                sim_matrices["doc_to_query"] = similarity_fct(queries, local_docs).T
 
             if "doc_to_doc" in self.directions:
                 # (mbs, bs * ws * (1 + nn))
-                sim_matrices["doc_to_doc"] = self.similarity_fct(docs_all, local_docs).T
+                sim_matrices["doc_to_doc"] = similarity_fct(docs_all, local_docs).T
                 # Remove d_i_a -> d_i_b for all documents belonging to the same query
                 same_query_doc_mask = own_columns.repeat(1, num_docs)
                 sim_matrices["doc_to_doc"].masked_fill_(same_query_doc_mask, -torch.inf)
@@ -369,6 +393,10 @@ class CachedMultipleNegativesRankingLoss(CachedLossMixin, nn.Module):
                 loss_mbatch = loss_mbatch.detach()
             losses.append(loss_mbatch)
 
+        if normalization_graph:
+            torch.autograd.backward(
+                [x for x, _ in normalization_graph], [leaf.grad for _, leaf in normalization_graph]
+            )
         return sum(losses)
 
     def forward(self, sentence_features: Iterable[dict[str, Tensor]], labels: Tensor) -> Tensor:
