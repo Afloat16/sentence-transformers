@@ -134,7 +134,9 @@ class MatryoshkaLoss(nn.Module):
             model: SentenceTransformer model
             loss: The loss function to be used, e.g.
                 :class:`MultipleNegativesRankingLoss`,
-                :class:`CoSENTLoss`, etc.
+                :class:`CoSENTLoss`, etc. Losses whose targets are scores rather than embeddings can set
+                ``labels_are_embeddings = False`` to keep their target width fixed. Custom losses without this
+                attribute retain shape-based truncation of labels whose width matches the full embedding dimension.
             matryoshka_dims: A list of embedding dimensions to be used
                 for the loss function, e.g. [768, 512, 256, 128, 64].
             matryoshka_weights: A list of weights to be used for the
@@ -247,11 +249,12 @@ class MatryoshkaLoss(nn.Module):
                 dim = self.matryoshka_dims[idx]
                 weight = self.matryoshka_weights[idx]
                 decorated_forward.set_dim(dim)
-                # If the labels seem to be (per-column) embeddings, truncate them to match the soon-to-be-truncated
-                # predicted embeddings. This allows for MatryoshkaLoss with a direct distillation loss
+                # Keep explicitly declared score targets intact even if their width happens to match the
+                # embedding dimension. Otherwise preserve the existing (per-column) embedding-label heuristic.
                 dim_labels = labels
                 if (
                     isinstance(labels, torch.Tensor)
+                    and getattr(self.loss, "labels_are_embeddings", True)
                     and labels.ndim in (2, 3)
                     and labels.size(-1) == self.model._get_untruncated_embedding_dimension()
                 ):

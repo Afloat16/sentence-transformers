@@ -12,6 +12,9 @@ from sentence_transformers.util import pairwise_dot_score, similarity_fct_name
 
 
 class MarginMSELoss(nn.Module):
+    # Teacher scores/margins describe candidates, not embedding coordinates.
+    labels_are_embeddings: bool = False
+
     def __init__(self, model: SentenceTransformer, similarity_fct=pairwise_dot_score) -> None:
         """
         Compute the MSE loss between the predicted margin ``sim(Query, Pos) - sim(Query, Neg)`` and the gold margin

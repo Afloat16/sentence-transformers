@@ -17,6 +17,9 @@ from sentence_transformers.util import (
 
 
 class DistillKLDivLoss(nn.Module):
+    # Teacher scores describe candidates, so their width is independent of the embedding dimension.
+    labels_are_embeddings: bool = False
+
     def __init__(
         self,
         model: SentenceTransformer,
