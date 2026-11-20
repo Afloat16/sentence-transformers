@@ -99,7 +99,9 @@ class CosineSimilarityLoss(nn.Module):
                 f"but got {labels.numel()} labels with shape {tuple(labels.shape)}."
             )
         output = self.cos_score_transformation(torch.cosine_similarity(embeddings[0], embeddings[1]))
-        return self.loss_fct(output, labels.float().view(-1))
+        if output.dtype in (torch.float16, torch.bfloat16):
+            output = output.float()
+        return self.loss_fct(output, labels.to(output.dtype).view(-1))
 
     def get_config_dict(self) -> dict[str, Any]:
         return {
