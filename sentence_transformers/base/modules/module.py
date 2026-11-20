@@ -4,6 +4,7 @@ import json
 import os
 import warnings
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 try:
@@ -448,6 +449,11 @@ class Module(ABC, torch.nn.Module):
             save_safetensors_model(self, os.path.join(output_path, "model.safetensors"))
         else:
             torch.save(self.state_dict(), os.path.join(output_path, "pytorch_model.bin"))
+
+        # A loader must not prefer stale weights left over from the other serialization format.
+        # Only remove the other format after the new weights have been written successfully.
+        other_filename = "pytorch_model.bin" if safe_serialization else "model.safetensors"
+        Path(output_path, other_filename).unlink(missing_ok=True)
 
     _DEPRECATED_METHOD_RENAMES: dict[str, str] = {
         "get_sentence_embedding_dimension": "get_embedding_dimension",

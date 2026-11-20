@@ -4,7 +4,6 @@ import copy
 import inspect
 import logging
 import math
-import os
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +14,6 @@ except ImportError:
 
 import numpy as np
 import torch
-from safetensors.torch import save_file as save_safetensors_file
 from tokenizers import Tokenizer
 from torch import nn
 from transformers import PreTrainedTokenizerFast
@@ -131,10 +129,7 @@ class StaticEmbedding(InputModule):
         return self.embedding_dim
 
     def save(self, output_path: str, *args, safe_serialization: bool = True, **kwargs) -> None:
-        if safe_serialization:
-            save_safetensors_file(self.state_dict(), os.path.join(output_path, "model.safetensors"))
-        else:
-            torch.save(self.state_dict(), os.path.join(output_path, "pytorch_model.bin"))
+        self.save_torch_weights(output_path, safe_serialization=safe_serialization)
         self.tokenizer.save(str(Path(output_path) / "tokenizer.json"))
 
     @classmethod
