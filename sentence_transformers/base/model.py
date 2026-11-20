@@ -817,9 +817,9 @@ class BaseModel(nn.Sequential, PeftAdapterMixin, ABC):
                     dest_file = Path(model_path) / (Path(needed_file).name)
                     shutil.copy(needed_file, dest_file)
 
-                # For remote modules, we want to ignore the "transformers_modules.{repo_id}" part,
-                # i.e. we only want the filename
-                class_ref = f"{class_ref.split('.')[-1]}.{type(module).__name__}"
+                # Refer to the copied code relative to the checkpoint root, where dynamic loading starts.
+                class_file_ref = Path(os.path.basename(model_path), Path(class_file).stem).as_posix()
+                class_ref = f"{class_file_ref}.{type(module).__name__}"
             else:
                 class_ref = f"{class_ref}.{type(module).__name__}"
 
