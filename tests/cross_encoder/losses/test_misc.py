@@ -128,6 +128,60 @@ def test_ranking_loss_without_ordered_pairs_has_zero_loss_and_gradients(loss_cls
     torch.testing.assert_close(model.scores.grad, torch.zeros_like(model.scores))
 
 
+@pytest.mark.parametrize("loss_cls", [PListMLELoss, ListMLELoss])
+@pytest.mark.parametrize("respect_input_order", [True, False])
+@pytest.mark.parametrize("scores", [[10.0], [10.0, -10.0]], ids=["single_document", "rounded_zero"])
+@pytest.mark.parametrize("include_empty_query", [False, True])
+def test_listmle_zero_loss_keeps_model_gradients(loss_cls, respect_input_order, scores, include_empty_query):
+    model = _ScoreModel(torch.tensor(scores))
+    queries = ["query"]
+    documents = [[str(i) for i in range(len(scores))]]
+    labels = [torch.arange(len(scores), 0, -1, dtype=torch.float32)]
+    if include_empty_query:
+        queries.append("empty")
+        documents.append([])
+        labels.append(torch.empty(0))
+    loss = loss_cls(model, respect_input_order=respect_input_order)((queries, documents), labels)
+    assert loss.item() == 0.0
+    loss.backward()
+    assert model.scores.grad is not None
+    assert torch.isfinite(model.scores.grad).all()
+    if len(scores) == 1:
+        torch.testing.assert_close(model.scores.grad, torch.zeros_like(model.scores))
+
+
+def test_plistmle_preserves_nonzero_gradient_when_loss_rounds_to_zero():
+    model = _ScoreModel(torch.tensor([10.0, -10.0]))
+    loss = PListMLELoss(model)((["query"], [["0", "1"]]), [torch.tensor([1.0, 0.0])])
+    assert loss.item() == 0.0
+
+    # For two documents, the position weights are [1, 0], so this equals cross-entropy.
+    # Its tiny but representable gradient must not be discarded because the loss rounds to zero.
+    reference_scores = model.scores.detach().clone().requires_grad_()
+    reference = torch.nn.functional.cross_entropy(reference_scores.unsqueeze(0), torch.tensor([0]))
+    loss.backward()
+    reference.backward()
+    assert model.scores.grad is not None
+    torch.testing.assert_close(model.scores.grad, reference_scores.grad, rtol=2e-6, atol=0)
+
+
+@pytest.mark.parametrize("loss_cls", [PListMLELoss, ListMLELoss])
+def test_listmle_zero_loss_allows_grad_scaler_step(loss_cls):
+    if not hasattr(torch.amp, "GradScaler"):
+        pytest.skip("torch.amp.GradScaler is unavailable in this PyTorch version")
+    model = _ScoreModel(torch.tensor([10.0, -10.0]))
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    scaler = torch.amp.GradScaler("cpu")
+    loss = loss_cls(model)((["query"], [["0", "1"]]), [torch.tensor([1.0, 0.0])])
+    scaler.scale(loss).backward()
+    # A disconnected zero loss leaves every model gradient unset, so step() otherwise raises
+    # "No inf checks were recorded for this optimizer."
+    scaler.step(optimizer)
+    scaler.update()
+    assert model.scores.grad is not None
+    assert torch.isfinite(model.scores.grad).all()
+
+
 @pytest.mark.parametrize("loss_cls", [LambdaLoss, RankNetLoss])
 def test_ranking_loss_averages_ordered_pairs_in_mixed_batch(loss_cls):
     model = _ScoreModel(torch.tensor([1.0, 0.0, -1.0, 0.0, 2.0, 3.0]))
