@@ -4,6 +4,7 @@ import hashlib
 import logging
 import os
 import random
+from collections import Counter
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
@@ -353,10 +354,9 @@ def mine_hard_negatives(
             f"Setting `absolute_margin` to `{absolute_margin}`."
         )
 
-    # To avoid re-embedding the same query multiple times, we keep a counter of the number of positives per query
-    positives_per_query = list(
-        dataset.to_pandas().groupby(anchor_column_name).count().to_dict()[positive_column_name].values()
-    )
+    # Count queries after dataset transforms so candidate budgets match the positives excluded during mining.
+    queries = _to_list(dataset[anchor_column_name])
+    positives_per_query = list(Counter(queries).values())
     max_positives = max(positives_per_query)
 
     # range_max is derived from num_negatives below, so a non-positive value has to be rejected first: it would
@@ -412,7 +412,6 @@ def mine_hard_negatives(
         )
 
     log_counters = {}
-    queries = _to_list(dataset[anchor_column_name])
     positives = _to_list(dataset[positive_column_name])
     corpus = positives if corpus is None else _to_list(corpus)
 

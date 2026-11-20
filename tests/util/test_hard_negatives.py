@@ -17,6 +17,7 @@ from torch import Tensor
 
 from sentence_transformers import CrossEncoder
 from sentence_transformers.sentence_transformer.model import SentenceTransformer
+from sentence_transformers.sentence_transformer.modules import BoW
 from sentence_transformers.util import cos_sim, mine_hard_negatives, pairwise_cos_sim
 
 pytest.importorskip("datasets", exc_type=ModuleNotFoundError)
@@ -1078,6 +1079,54 @@ def test_custom_dataset_transform(dataset: Dataset, static_retrieval_mrl_en_v1_m
     rng.seed(42)
     result = mine_hard_negatives(transformed, model, output_scores=True, verbose=False)
     assert result.to_dict() == expected.to_dict()
+
+
+@pytest.mark.parametrize("output_format", ["triplet", "n-tuple", "labeled-pair", "labeled-list"])
+@pytest.mark.parametrize("output_scores", [False, True])
+@pytest.mark.parametrize("range_max", [None, 2])
+@pytest.mark.parametrize("use_faiss", [False, True])
+def test_transformed_queries_preserve_negative_candidate_budget(
+    output_format: str, output_scores: bool, range_max: int | None, use_faiss: bool
+) -> None:
+    if use_faiss:
+        pytest.importorskip("faiss")
+    positives = ["cat cat", "cat pet", "cat kitten", "cat pet kitten"]
+    dataset = Dataset.from_dict(
+        {"query": ["cat", "Cat", " cat", "cat "], "positive": positives, "metadata": [0, 1, 2, 3]}
+    )
+
+    def normalize_queries(batch):
+        return {
+            key: [text.strip().lower() for text in values] if key == "query" else values
+            for key, values in batch.items()
+        }
+
+    transformed = dataset.with_transform(normalize_queries)
+    materialized = Dataset.from_dict(transformed[:])
+    model = SentenceTransformer(modules=[BoW(vocab=["cat", "pet", "kitten", "bird", "wing"])])
+    kwargs = {
+        "model": model,
+        "corpus": positives + ["bird wing"],
+        "num_negatives": 1,
+        "range_max": range_max,
+        "output_format": output_format,
+        "output_scores": output_scores,
+        "use_faiss": use_faiss,
+        "verbose": False,
+    }
+
+    expected = mine_hard_negatives(materialized, **kwargs)
+    actual = mine_hard_negatives(transformed, **kwargs)
+
+    assert actual.to_dict() == expected.to_dict()
+    assert len(actual) == (5 if output_format == "labeled-pair" else 4)
+    if output_format in ("triplet", "n-tuple"):
+        column = "negative" if output_format == "triplet" else "negative_1"
+        assert list(actual[column]) == ["bird wing"] * 4
+    elif output_format == "labeled-list":
+        assert [row[-1] for row in actual["positive"]] == ["bird wing"] * 4
+    else:
+        assert list(actual["positive"]) == positives + ["bird wing"]
 
 
 @pytest.mark.parametrize("output_format", ["triplet", "n-tuple"])
