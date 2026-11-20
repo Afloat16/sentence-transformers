@@ -240,6 +240,88 @@ def test_paraphrase_mining_embeddings_preserves_score_buffer() -> None:
     torch.testing.assert_close(scores, original_scores)
 
 
+@pytest.mark.parametrize("score_function", [cos_sim, dot_score])
+@pytest.mark.parametrize(("query_chunk_size", "corpus_chunk_size"), [(1, 1), (2, 4), (100, 100)])
+@pytest.mark.parametrize(("top_k", "max_pairs"), [(1, 5), (3, 7), (20, 100)])
+def test_paraphrase_mining_embeddings_sparse_matches_dense(
+    score_function: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+    query_chunk_size: int,
+    corpus_chunk_size: int,
+    top_k: int,
+    max_pairs: int,
+) -> None:
+    generator = torch.Generator().manual_seed(42)
+    embeddings = torch.randn(9, 19, generator=generator)
+    embeddings[torch.rand(embeddings.shape, generator=generator) < 0.45] = 0
+    sparse_embeddings = embeddings.to_sparse()
+    indices, values = sparse_embeddings.indices().clone(), sparse_embeddings.values().clone()
+    kwargs = {
+        "query_chunk_size": query_chunk_size,
+        "corpus_chunk_size": corpus_chunk_size,
+        "top_k": top_k,
+        "max_pairs": max_pairs,
+        "score_function": score_function,
+    }
+
+    expected = paraphrase_mining_embeddings(embeddings, **kwargs)
+    actual = paraphrase_mining_embeddings(sparse_embeddings, **kwargs)
+
+    assert [(i, j) for _, i, j in actual] == [(i, j) for _, i, j in expected]
+    assert [score for score, _, _ in actual] == pytest.approx([score for score, _, _ in expected], abs=1e-6)
+    torch.testing.assert_close(sparse_embeddings.indices(), indices)
+    torch.testing.assert_close(sparse_embeddings.values(), values)
+
+
+@pytest.mark.parametrize("score_function", [cos_sim, dot_score])
+def test_paraphrase_mining_embeddings_sparse_uncoalesced_and_empty_rows(
+    score_function: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+) -> None:
+    # Repeated coordinates include cancellation to zero, and the last row has no stored values.
+    embeddings = torch.sparse_coo_tensor(
+        [[0, 0, 0, 1, 1, 1, 2, 2], [0, 0, 1, 0, 2, 2, 0, 1]],
+        [1.0, 2.0, -1.0, 2.0, 4.0, -4.0, -2.0, 1.0],
+        size=(4, 5),
+    )
+    indices, values = embeddings._indices().clone(), embeddings._values().clone()
+
+    actual = paraphrase_mining_embeddings(
+        embeddings, query_chunk_size=3, corpus_chunk_size=2, top_k=4, score_function=score_function
+    )
+    scores = score_function(embeddings.to_dense(), embeddings.to_dense())
+    expected = {(i, j): scores[i, j].item() for i in range(4) for j in range(i + 1, 4)}
+
+    assert {(i, j): score for score, i, j in actual} == pytest.approx(expected, abs=1e-6)
+    assert not embeddings.is_coalesced()
+    torch.testing.assert_close(embeddings._indices(), indices)
+    torch.testing.assert_close(embeddings._values(), values)
+
+
+@pytest.mark.parametrize(("num_rows", "top_k", "max_pairs"), [(0, 2, 10), (1, 2, 10), (4, 0, 10), (4, 2, 0)])
+def test_paraphrase_mining_embeddings_sparse_no_pairs(num_rows: int, top_k: int, max_pairs: int) -> None:
+    embeddings = torch.zeros(num_rows, 5).to_sparse()
+
+    assert paraphrase_mining_embeddings(embeddings, top_k=top_k, max_pairs=max_pairs) == []
+
+
+def test_paraphrase_mining_embeddings_keeps_sparse_chunks() -> None:
+    embeddings = torch.tensor([[1.0, 0.0], [2.0, 0.0], [0.0, 3.0], [0.0, 4.0], [1.0, 1.0]]).to_sparse()
+    chunk_shapes = []
+
+    def score_function(queries: torch.Tensor, corpus: torch.Tensor) -> torch.Tensor:
+        assert queries.is_sparse and corpus.is_sparse
+        assert queries.shape[1] == corpus.shape[1] == embeddings.shape[1]
+        assert queries.device == corpus.device == embeddings.device
+        chunk_shapes.append((len(queries), len(corpus)))
+        return dot_score(queries, corpus)
+
+    pairs = paraphrase_mining_embeddings(
+        embeddings, query_chunk_size=2, corpus_chunk_size=3, top_k=1, max_pairs=1, score_function=score_function
+    )
+
+    assert pairs == [[12.0, 2, 3]]
+    assert chunk_shapes == [(2, 3), (2, 2), (2, 3), (2, 2), (1, 3), (1, 2)]
+
+
 def test_community_detection_two_clear_communities():
     """Test case with two clear communities."""
     embeddings = torch.tensor(

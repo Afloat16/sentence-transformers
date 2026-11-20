@@ -101,7 +101,7 @@ def paraphrase_mining_embeddings(
     other sentences and returns a list with the pairs that have the highest cosine similarity score.
 
     Args:
-        embeddings (Tensor): A tensor with the embeddings
+        embeddings (Tensor): A 2-dimensional tensor with the embeddings. Can be a sparse COO tensor.
         query_chunk_size (int): Search for most similar pairs for #query_chunk_size at the same time. Decrease, to lower memory footprint (increases run-time).
         corpus_chunk_size (int): Compare a sentence simultaneously against #corpus_chunk_size other sentences. Decrease, to lower memory footprint (increases run-time).
         max_pairs (int): Maximal number of text pairs returned.
@@ -117,16 +117,26 @@ def paraphrase_mining_embeddings(
     pairs = []  # Min-heap of (score, i, j) with i < j, capped at max_pairs entries
     queued_pairs = set()  # The (i, j) of every pair currently in `pairs`
     min_score = float("-inf")
+    is_sparse = isinstance(embeddings, Tensor) and embeddings.is_sparse
 
     for query_start_idx in range(0, len(embeddings), query_chunk_size):
-        query_embeddings = embeddings[query_start_idx : query_start_idx + query_chunk_size]
+        query_end_idx = min(query_start_idx + query_chunk_size, len(embeddings))
+        if is_sparse:
+            indices = torch.arange(query_start_idx, query_end_idx, device=embeddings.device)
+            query_embeddings = embeddings.index_select(0, indices)
+        else:
+            query_embeddings = embeddings[query_start_idx:query_end_idx]
 
         # Keep each query's top_k across all corpus chunks, so the candidates don't depend on corpus_chunk_size
         scores_top_k_values, scores_top_k_idx = None, None
         for corpus_start_idx in range(0, len(embeddings), corpus_chunk_size):
-            scores = score_function(
-                query_embeddings, embeddings[corpus_start_idx : corpus_start_idx + corpus_chunk_size]
-            ).detach()
+            corpus_end_idx = min(corpus_start_idx + corpus_chunk_size, len(embeddings))
+            if is_sparse:
+                indices = torch.arange(corpus_start_idx, corpus_end_idx, device=embeddings.device)
+                corpus_embeddings = embeddings.index_select(0, indices)
+            else:
+                corpus_embeddings = embeddings[corpus_start_idx:corpus_end_idx]
+            scores = score_function(query_embeddings, corpus_embeddings).detach()
             chunk_values, chunk_idx = torch.topk(scores, min(top_k + 1, len(scores[0])), dim=1, largest=True)
             chunk_idx = chunk_idx + corpus_start_idx
 
