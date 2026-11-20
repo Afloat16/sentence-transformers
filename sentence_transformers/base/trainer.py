@@ -944,7 +944,7 @@ class BaseTrainer(Trainer, ABC):
         # For evaluation, setting 'even_batches' to False results in hanging, so we keep it as True there.
         self.accelerator.even_batches = False
         self._train_dataloader = self.accelerator.prepare(
-            self._build_dataloader(self.train_dataset, self.args.train_batch_size, dataset_kind="train")
+            self._build_dataloader(self.train_dataset, self._train_batch_size, dataset_kind="train")
         )
         return self._train_dataloader
 
