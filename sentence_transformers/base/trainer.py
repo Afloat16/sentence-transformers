@@ -1218,12 +1218,14 @@ class BaseTrainer(Trainer, ABC):
         if transform:
             batch = transform(batch)
 
-        # Return if 1) the batch has no columns, 2) if it's empty, or 3) if there is no dataset name
-        if not batch or not list(batch.values())[0] or dataset_name is None:
+        if not batch or dataset_name is None:
             return batch
 
-        # Add the dataset name to the batch
-        batch_size = len(list(batch.values())[0])
+        # Transforms can return tensor or array columns, whose truth value is not a batch-size check.
+        batch_size = len(next(iter(batch.values())))
+        if batch_size == 0:
+            return batch
+
         batch["dataset_name"] = [dataset_name] * batch_size
         return batch
 

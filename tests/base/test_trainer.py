@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 import torch
 import torch.distributed as dist
@@ -403,6 +404,106 @@ def loss_training_model() -> SentenceTransformer:
     model = SentenceTransformer(modules=[StaticEmbedding(tokenizer, embedding_weights=weights)], device="cpu")
     model.model_card_data.generate_widget_examples = False
     return model
+
+
+@pytest.mark.parametrize("values", [[], [0.0], [0.0, 1.0]])
+@pytest.mark.parametrize("convert", [list, torch.tensor, np.asarray], ids=["list", "torch", "numpy"])
+def test_dataset_name_transform_uses_batch_length(values, convert) -> None:
+    labels = convert(values)
+    batch = {"label": labels, "sentence": ["hello"] * len(values)}
+
+    result = SentenceTransformerTrainer.add_dataset_name_transform(batch, dataset_name="train")
+
+    assert result["label"] is labels
+    assert result["sentence"] == ["hello"] * len(values)
+    if values:
+        assert result["dataset_name"] == ["train"] * len(values)
+    else:
+        assert "dataset_name" not in result
+
+
+@pytest.mark.parametrize("convert", [torch.tensor, np.asarray], ids=["torch", "numpy"])
+def test_dataset_name_transform_composes_array_transform(convert) -> None:
+    calls = []
+
+    def transform(batch):
+        calls.append(batch)
+        return {"label": convert(batch["label"]), "sentence": [text.upper() for text in batch["sentence"]]}
+
+    dataset = Dataset.from_dict({"label": [0.0, 1.0], "sentence": ["hello", "world"]}).with_transform(transform)
+    trainer = object.__new__(SentenceTransformerTrainer)
+    named = trainer.add_dataset_name_column(dataset, dataset_name="task")
+
+    for indices in ([0], [0, 1]):
+        calls.clear()
+        batch = named[indices]
+        assert batch["dataset_name"] == ["task"] * len(indices)
+        assert batch["label"].tolist() == [0.0, 1.0][: len(indices)]
+        assert batch["sentence"] == ["HELLO", "WORLD"][: len(indices)]
+        assert len(calls) == 1
+    assert "dataset_name" not in dataset[0]
+
+
+@pytest.mark.parametrize("dataset_name", [None, "task"])
+def test_dataset_name_transform_preserves_empty_mapping(dataset_name) -> None:
+    assert SentenceTransformerTrainer.add_dataset_name_transform({}, dataset_name=dataset_name) == {}
+
+
+@pytest.mark.parametrize("convert", [torch.tensor, np.asarray], ids=["torch", "numpy"])
+def test_dataset_name_transform_without_name_still_applies_transform(convert) -> None:
+    transformed = {"label": convert([0.0, 1.0])}
+    result = SentenceTransformerTrainer.add_dataset_name_transform(
+        {"label": [0.0, 1.0]}, dataset_name=None, transform=lambda batch: transformed
+    )
+    assert result is transformed
+    assert "dataset_name" not in result
+
+
+def test_multi_dataset_training_with_tensor_label_transform(loss_training_model, tmp_path) -> None:
+    model = loss_training_model
+
+    def transform(batch):
+        return {
+            "label": torch.tensor(batch["label"]),
+            "sentence1": batch["sentence1"],
+            "sentence2": batch["sentence2"],
+        }
+
+    def make_dataset():
+        return Dataset.from_dict(
+            {
+                "label": [0.0, 1.0],
+                "sentence1": ["hello", "world"],
+                "sentence2": ["world", "hello"],
+            }
+        ).with_transform(transform)
+
+    calls = []
+    losses = {name: CosineSimilarityLoss(model) for name in ("first", "second")}
+    for name, loss in losses.items():
+        loss.register_forward_pre_hook(lambda module, inputs, name=name: calls.append(name))
+    trainer = SentenceTransformerTrainer(
+        model=model,
+        train_dataset=DatasetDict({name: make_dataset() for name in losses}),
+        loss=losses,
+        args=SentenceTransformerTrainingArguments(
+            output_dir=str(tmp_path),
+            num_train_epochs=1,
+            per_device_train_batch_size=2,
+            learning_rate=0.01,
+            save_strategy="no",
+            report_to=[],
+            use_cpu=True,
+        ),
+    )
+    before = next(model.parameters()).detach().clone()
+
+    result = trainer.train()
+
+    assert result.global_step == 2
+    assert sorted(calls) == ["first", "second"]
+    assert not torch.equal(next(model.parameters()), before)
+    assert torch.isfinite(next(model.parameters())).all()
 
 
 def test_embedding_distillation_with_tensor_formatted_labels(loss_training_model, tmp_path):
