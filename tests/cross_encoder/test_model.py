@@ -982,6 +982,27 @@ STRUCTURED_RERANKER_TEMPLATE = (
     '<Query>: {{ (messages | selectattr("role", "eq", "query") | first).content[0].text }}\n'
     '<Document>: {{ (messages | selectattr("role", "eq", "document") | first).content[0].text }}'
 )
+
+
+@pytest.mark.parametrize("suffix", ["jpg", "mp3", "mp4"])
+@pytest.mark.parametrize("position", [0, 1])
+def test_text_pairs_with_media_urls_preserve_model_inputs(suffix, position):
+    model = CrossEncoder(
+        "cross-encoder-testing/reranker-bert-tiny-gooaq-bce",
+        processor_kwargs={"chat_template": STRUCTURED_RERANKER_TEMPLATE},
+    )
+    pair = ["a query", "a document"]
+    pair[position] = f"https://example.com/sample.{suffix}"
+    explicit = [{"text": value} for value in pair]
+
+    features = model.preprocess([pair])
+    expected = model.preprocess([explicit])
+
+    torch.testing.assert_close(features["input_ids"], expected["input_ids"])
+    torch.testing.assert_close(features["attention_mask"], expected["attention_mask"])
+    np.testing.assert_array_equal(model.predict([pair]), model.predict([explicit]))
+
+
 BERLIN_PAIRS = [
     ["How many people live in Berlin?", "Berlin has a population of 3,520,031 registered inhabitants."],
     ["How many people live in Berlin?", "Berlin is well known for its museums."],

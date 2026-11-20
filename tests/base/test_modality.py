@@ -1332,6 +1332,41 @@ class TestIsNonTextPair:
 
 
 class TestPairToMessages:
+    @pytest.mark.parametrize(("suffix", "modality"), [("jpg", "image"), ("mp3", "audio"), ("mp4", "video")])
+    @pytest.mark.parametrize("location", ["url", "file"])
+    @pytest.mark.parametrize("position", [0, 1])
+    def test_text_pair_media_strings_respect_supported_modalities(
+        self, suffix, modality, location, position, tmp_path
+    ):
+        if location == "file":
+            path = tmp_path / f"sample.{suffix}"
+            path.write_bytes(b"fixture")
+            text = str(path)
+        else:
+            text = f"https://example.com/sample.{suffix}"
+        fmt = InputFormatter(model_type="test", message_format="structured", supported_modalities=["text", "message"])
+        pair = ["query", "document"]
+        pair[position] = text
+
+        detected, inputs, _ = fmt.parse_inputs([pair])
+        _, result = fmt.batch_to_message(detected, inputs)
+
+        assert result["message"][0] == [
+            {"role": role, "content": [{"type": "text", "text": value}]}
+            for role, value in zip(("query", "document"), pair)
+        ]
+
+    @pytest.mark.parametrize(("suffix", "modality"), [("jpg", "image"), ("mp3", "audio"), ("mp4", "video")])
+    @pytest.mark.parametrize("infer_support", [False, True])
+    def test_pair_media_strings_keep_supported_routing(self, suffix, modality, infer_support):
+        supported = None if infer_support else ["text", "message", modality]
+        fmt = InputFormatter(model_type="test", message_format="structured", supported_modalities=supported)
+        url = f"https://example.com/sample.{suffix}"
+
+        result = fmt.pair_to_messages(("query", url))
+
+        assert result[1]["content"] == [{"type": modality, modality: url}]
+
     @pytest.mark.parametrize("modalities", [("text", "image"), ("image", "text")])
     def test_compound_modality_preserves_user_order_in_both_roles(self, modalities):
         fmt = InputFormatter(model_type="test", message_format="structured")

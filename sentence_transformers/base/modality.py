@@ -527,7 +527,7 @@ class InputFormatter:
         """
         messages = []
         for role, item in zip(PAIR_ROLES, pair, strict=True):
-            modality = infer_modality(item)
+            modality = infer_modality(item, supported_modalities=self.supported_modalities)
             if self.message_format == "flat":
                 messages.append({"role": role, "content": item})
             else:
