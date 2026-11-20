@@ -906,7 +906,12 @@ class SentenceTransformer(BaseModel, FitMixin):
         elif self._distributed_inference is not None and device is None:
             all_embeddings = self._distributed_inference(inputs, **inference_kwargs)
         else:
-            all_embeddings = self._inference(inputs, device=device, **inference_kwargs)
+            all_embeddings = self._inference(
+                inputs,
+                device=device,
+                _stack_embeddings=convert_to_tensor or convert_to_numpy or precision not in (None, "float32"),
+                **inference_kwargs,
+            )
 
         if len(all_embeddings) and precision and precision != "float32":
             all_embeddings = quantize_embeddings(all_embeddings, precision=precision)
@@ -944,6 +949,7 @@ class SentenceTransformer(BaseModel, FitMixin):
         normalize_embeddings: bool,
         truncate_dim: int | None,
         device: str | torch.device | None = None,
+        _stack_embeddings: bool = True,
         **kwargs,
     ) -> list[Tensor] | Tensor | list[dict[str, Any]]:
         """Run local inference on normalized inputs with resolved arguments."""
@@ -1003,12 +1009,20 @@ class SentenceTransformer(BaseModel, FitMixin):
                     embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
                 if save_to_cpu:
                     embeddings = embeddings.cpu()
+                if output_value == "sentence_embedding" and not _stack_embeddings:
+                    # Keep compact batches without making a second corpus-sized tensor for list output.
+                    # Views must not retain the full storage after truncation or custom pooling.
+                    if (
+                        not embeddings.is_contiguous()
+                        or embeddings.untyped_storage().nbytes() > embeddings.numel() * embeddings.element_size()
+                    ):
+                        embeddings = embeddings.clone(memory_format=torch.contiguous_format)
 
             all_embeddings.extend(embeddings)
 
         all_embeddings = [all_embeddings[idx] for idx in np.argsort(length_sorted_idx)]
 
-        if output_value == "sentence_embedding":
+        if output_value == "sentence_embedding" and _stack_embeddings:
             return torch.stack(all_embeddings) if all_embeddings else torch.tensor([], device=device)
 
         return all_embeddings
