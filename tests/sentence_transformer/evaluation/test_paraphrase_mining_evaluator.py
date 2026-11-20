@@ -154,3 +154,49 @@ def test_duplicates_dict_accepts_plain_dict(add_transitive_closure: bool) -> Non
     )(model)
     assert metrics == pytest.approx(expected)
     assert duplicates == {"a": {"b": True}, "b": {"a": True}}
+
+
+@pytest.mark.parametrize("add_transitive_closure", [False, True])
+def test_mining_does_not_accumulate_negative_labels(add_transitive_closure: bool) -> None:
+    model = SentenceTransformer(modules=[BoW(["red", "blue", "green"])], device="cpu")
+    texts = {
+        "a": "red",
+        "b": "red red blue",
+        "c": "blue",
+        "d": "blue green",
+        "e": "green",
+        "f": "red green",
+    }
+    evaluator = ParaphraseMiningEvaluator(
+        texts,
+        duplicates_list=[("a", "b"), ("b", "c")],
+        duplicates_dict={"a": {"d": False}, "d": {"a": False}},
+        add_transitive_closure=add_transitive_closure,
+        top_k=2,
+        write_csv=False,
+    )
+    gold_labels = {key: dict(neighbors) for key, neighbors in evaluator.duplicates.items()}
+
+    # Different scoring functions discover different candidates, as successive training evaluations can.
+    for similarity in ["cosine", "dot", "manhattan"]:
+        model.similarity_fn_name = similarity
+        metrics = evaluator(model)
+        expected = ParaphraseMiningEvaluator(texts, duplicates_dict=gold_labels, top_k=2, write_csv=False)(model)
+        assert metrics == pytest.approx(expected)
+        assert {key: dict(neighbors) for key, neighbors in evaluator.duplicates.items()} == gold_labels
+
+
+@pytest.mark.parametrize(
+    "duplicates, expected_count",
+    [
+        ({"a": {"b": False}}, 0),
+        ({"a": {"b": False}, "b": {}}, 0),
+        ({"a": {"b": True}}, 1),
+        ({"b": {"a": True}}, 1),
+        ({"a": {"b": False}, "b": {"a": True}}, 1),
+    ],
+)
+def test_counting_duplicate_pairs_does_not_insert_missing_reverse_labels(duplicates, expected_count) -> None:
+    evaluator = ParaphraseMiningEvaluator({"a": "red", "b": "blue"}, duplicates_dict=duplicates, write_csv=False)
+    assert evaluator.total_num_duplicates == expected_count
+    assert {key: dict(neighbors) for key, neighbors in evaluator.duplicates.items()} == duplicates

@@ -139,13 +139,9 @@ class ParaphraseMiningEvaluator(BaseEvaluator):
             self.duplicates = self.add_transitive_closure(self.duplicates)
 
         positive_key_pairs = set()
-        for key1 in self.duplicates:
-            for key2 in self.duplicates[key1]:
-                if (
-                    key1 in sentences_map
-                    and key2 in sentences_map
-                    and (self.duplicates[key1][key2] or self.duplicates[key2][key1])
-                ):
+        for key1, neighbors in self.duplicates.items():
+            for key2, is_duplicate in neighbors.items():
+                if key1 in sentences_map and key2 in sentences_map and is_duplicate:
                     positive_key_pairs.add(tuple(sorted([key1, key2])))
 
         self.total_num_duplicates = len(positive_key_pairs)
@@ -204,7 +200,7 @@ class ParaphraseMiningEvaluator(BaseEvaluator):
 
             # Compute optimal threshold and F1-score
             n_extract += 1
-            if self.duplicates[id1][id2] or self.duplicates[id2][id1]:
+            if self.duplicates.get(id1, {}).get(id2, False) or self.duplicates.get(id2, {}).get(id1, False):
                 n_correct += 1
             if idx + 1 < len(pairs_list) and pairs_list[idx + 1][0] == score:
                 continue
