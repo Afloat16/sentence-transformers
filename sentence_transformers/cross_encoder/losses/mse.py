@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import torch
 from torch import Tensor, nn
 
 from sentence_transformers.cross_encoder.model import CrossEncoder
@@ -105,7 +106,9 @@ class MSELoss(nn.Module):
                 f"but got {labels.numel()} labels with shape {tuple(labels.shape)}."
             )
         labels = labels.view(-1)
-        loss = self.loss_fct(logits, labels.detach().float())
+        if logits.dtype in (torch.float16, torch.bfloat16):
+            logits = logits.float()
+        loss = self.loss_fct(logits, labels.detach().to(logits.dtype))
         return loss
 
     def get_config_dict(self):
