@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import sys
 import types
+from copy import deepcopy
+from itertools import product
+from urllib.parse import unquote
 
 import pytest
 import torch
@@ -216,8 +219,16 @@ def test_qdrant_client_kwargs(stub_qdrant_module, kwargs, expected_client_kwargs
 
 
 class StubSearchIndices:
+    def __init__(self):
+        self.mappings = {}
+        self.mapping_requests = []
+
     def create(self, *args, **kwargs):
-        pass
+        self.mappings[kwargs["index"]] = deepcopy(kwargs["body"])
+
+    def get_mapping(self, **kwargs):
+        self.mapping_requests.append(kwargs)
+        return deepcopy(self.mappings)
 
     def refresh(self, *args, **kwargs):
         pass
@@ -228,8 +239,11 @@ class StubSearchClient:
         self.hosts = hosts
         self.init_kwargs = kwargs
         self.indices = StubSearchIndices()
+        self.uploaded = []
+        self.searches = []
 
     def search(self, *args, **kwargs):
+        self.searches.append(deepcopy(kwargs))
         return {"hits": {"hits": [{"_id": "0", "_score": 1.0}]}}
 
 
@@ -239,7 +253,7 @@ def stub_search_clients(monkeypatch):
         module = types.ModuleType(module_name)
         setattr(module, client_name, StubSearchClient)
         helpers = types.ModuleType(f"{module_name}.helpers")
-        helpers.bulk = lambda client, actions: None
+        helpers.bulk = lambda client, actions: client.uploaded.extend(deepcopy(actions))
         module.helpers = helpers
         monkeypatch.setitem(sys.modules, module_name, module)
         monkeypatch.setitem(sys.modules, f"{module_name}.helpers", helpers)
@@ -279,3 +293,118 @@ def test_elasticsearch_client_cloud_id(stub_search_clients, cloud_id, expected_h
 
     assert client.hosts == expected_hosts
     assert client.init_kwargs == {"cloud_id": cloud_id, "api_key": "secret"}
+
+
+def _searched_elasticsearch_features(client):
+    clauses = client.searches[-1]["body"]["query"]["bool"]["should"]
+    return {clause["rank_feature"]["field"]: clause["rank_feature"]["boost"] for clause in clauses}
+
+
+def test_elasticsearch_keeps_distinct_token_dimensions(stub_search_clients) -> None:
+    tokens = [(".", 2.5), ("_", 1.0), ("%2E", 0.75), ("%", 0.5), ("##.", 1.5), ("##_", 0.25)]
+    original = deepcopy(tokens)
+    _, _, (client, index_name) = semantic_search_elasticsearch(
+        [tokens], corpus_embeddings_decoded=[tokens], output_index=True
+    )
+
+    expected = {"%2E": 2.5, "_": 1.0, "%252E": 0.75, "%25": 0.5, "##%2E": 1.5, "##_": 0.25}
+    assert client.uploaded[0]["_source"]["tokens"] == expected
+    assert _searched_elasticsearch_features(client) == {f"tokens.{key}": value for key, value in expected.items()}
+    assert client.indices.mappings[index_name]["mappings"]["_meta"] == {
+        "sentence_transformers_token_encoding": "percent_v1"
+    }
+    assert client.indices.mapping_requests == []
+    assert tokens == original
+
+
+def test_elasticsearch_token_encoding_roundtrips_names(stub_search_clients) -> None:
+    alphabet = [".", "_", "%", "2", "E", "é", "中"]
+    names = ["".join(parts) for size in [1, 2] for parts in product(alphabet, repeat=size)]
+    tokens = [(name, (index + 1) / len(names)) for index, name in enumerate(names)]
+    _, _, (client, _) = semantic_search_elasticsearch([tokens], corpus_embeddings_decoded=[tokens], output_index=True)
+
+    stored = client.uploaded[0]["_source"]["tokens"]
+    assert len(stored) == len(tokens)
+    assert all("." not in name for name in stored)
+    assert {unquote(name): value for name, value in stored.items()} == dict(tokens)
+
+
+def test_elasticsearch_reuses_saved_token_encoding_with_new_client(stub_search_clients) -> None:
+    tokens = [(".", 2.5), ("_", 1.0), ("%2E", 0.75)]
+    _, _, (indexing_client, index_name) = semantic_search_elasticsearch(
+        [tokens], corpus_embeddings_decoded=[tokens], output_index=True
+    )
+    query_client = StubSearchClient()
+    query_client.indices.mappings = deepcopy(indexing_client.indices.mappings)
+
+    semantic_search_elasticsearch([tokens], corpus_index=(query_client, index_name))
+
+    assert query_client.uploaded == []
+    assert _searched_elasticsearch_features(query_client) == _searched_elasticsearch_features(indexing_client)
+    assert query_client.indices.mapping_requests == [
+        {"index": index_name, "filter_path": "*.mappings._meta,*.mappings.properties.tokens"}
+    ]
+
+
+@pytest.mark.parametrize("metadata", [None, {}, {"application": "existing-index"}])
+def test_elasticsearch_preserves_legacy_index_encoding(stub_search_clients, metadata) -> None:
+    client = StubSearchClient()
+    mapping = {"properties": {"tokens": {"type": "rank_features"}}}
+    if metadata is not None:
+        mapping["_meta"] = metadata
+    client.indices.mappings = {"legacy": {"mappings": mapping}}
+    original = deepcopy(client.indices.mappings)
+
+    semantic_search_elasticsearch([[(".", 2.5), ("_", 1.0), ("%2E", 0.75)]], corpus_index=(client, "legacy"))
+
+    # Preserve the previous query contract; lost dimensions require rebuilding the old index.
+    assert _searched_elasticsearch_features(client) == {"tokens._": 1.0, "tokens.%2E": 0.75}
+    assert client.indices.mappings == original
+    assert client.uploaded == []
+
+
+def test_elasticsearch_resolves_encoding_for_index_alias(stub_search_clients) -> None:
+    client = StubSearchClient()
+    client.indices.mappings = {
+        name: {"mappings": {"_meta": {"sentence_transformers_token_encoding": "percent_v1"}}}
+        for name in ["corpus-1", "corpus-2"]
+    }
+
+    semantic_search_elasticsearch([[(".", 1.0)]], corpus_index=(client, "corpus-alias"))
+
+    assert _searched_elasticsearch_features(client) == {"tokens.%2E": 1.0}
+    assert client.searches[-1]["index"] == "corpus-alias"
+
+
+def test_elasticsearch_rejects_mixed_index_encodings(stub_search_clients) -> None:
+    client = StubSearchClient()
+    client.indices.mappings = {
+        "legacy": {"mappings": {"properties": {"tokens": {"type": "rank_features"}}}},
+        "new": {"mappings": {"_meta": {"sentence_transformers_token_encoding": "percent_v1"}}},
+    }
+
+    with pytest.raises(ValueError, match="different token encodings.*Search them separately"):
+        semantic_search_elasticsearch([[(".", 1.0)]], corpus_index=(client, "mixed-alias"))
+    assert client.searches == []
+
+
+@pytest.mark.parametrize("encoding", ["percent_v2", 42, {"version": 2}])
+def test_elasticsearch_rejects_unknown_index_encoding(stub_search_clients, encoding) -> None:
+    client = StubSearchClient()
+    client.indices.mappings = {"future": {"mappings": {"_meta": {"sentence_transformers_token_encoding": encoding}}}}
+
+    with pytest.raises(ValueError, match="Unsupported Elasticsearch token encoding.*rebuild"):
+        semantic_search_elasticsearch([[(".", 1.0)]], corpus_index=(client, "future"))
+    assert client.searches == []
+
+
+def test_elasticsearch_mapping_error_does_not_fall_back_to_legacy_encoding(stub_search_clients, monkeypatch) -> None:
+    client = StubSearchClient()
+
+    def inaccessible_mapping(**kwargs):
+        raise PermissionError("mapping is not readable")
+
+    monkeypatch.setattr(client.indices, "get_mapping", inaccessible_mapping)
+    with pytest.raises(PermissionError, match="mapping is not readable"):
+        semantic_search_elasticsearch([[(".", 1.0)]], corpus_index=(client, "restricted"))
+    assert client.searches == []

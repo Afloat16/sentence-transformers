@@ -13,6 +13,8 @@ from sentence_transformers.util.tensor import _tensor_to_numpy
 
 logger = logging.getLogger(__name__)
 
+_ELASTICSEARCH_TOKEN_ENCODING = "percent_v1"
+
 if TYPE_CHECKING:
     try:
         from elasticsearch import Elasticsearch
@@ -168,6 +170,14 @@ def semantic_search_qdrant(
         return all_results, search_time
 
 
+def _encode_elasticsearch_token(token: str, encoding: str | None) -> str:
+    token = str(token)
+    if encoding is None:
+        return token.replace(".", "_")
+    # Escape the escape character first, so literal "%2E" and "." remain distinct.
+    return token.replace("%", "%25").replace(".", "%2E")
+
+
 def semantic_search_elasticsearch(
     query_embeddings_decoded: list[list[tuple[str, float]]],
     corpus_embeddings_decoded: list[list[tuple[str, float]]] | None = None,
@@ -194,7 +204,9 @@ def semantic_search_elasticsearch(
             Only used if corpus_index is None
             Can be obtained using the same decode method as query embeddings
         corpus_index: Tuple of (Elasticsearch, collection_name)
-            If provided, uses this existing index for search
+            If provided, reads the index mapping to use its stored token-name encoding. Indices without encoding
+            metadata keep the legacy dot-to-underscore mapping; rebuild them from the original decoded corpus to
+            avoid collisions between distinct tokens. The client must be allowed to read index mappings.
         top_k: Number of top results to retrieve
         output_index: Whether to return the Elasticsearch client and collection name
         **kwargs: Additional keyword arguments passed to ``Elasticsearch`` when creating a new client.
@@ -219,6 +231,7 @@ def semantic_search_elasticsearch(
     ):
         raise ValueError("Query embeddings must be a list of lists in the format [[('token', value), ...], ...]")
 
+    token_encoding = _ELASTICSEARCH_TOKEN_ENCODING
     if corpus_index is None:
         if corpus_embeddings_decoded is None:
             raise ValueError("Either corpus_embeddings_decoded or corpus_index must be provided")
@@ -238,12 +251,13 @@ def semantic_search_elasticsearch(
             index=index_name,
             body={
                 "mappings": {
+                    "_meta": {"sentence_transformers_token_encoding": token_encoding},
                     "properties": {
                         "tokens": {
                             "type": "rank_features"  # This is the key - use rank_features for sparse vectors
                         },
                         "id": {"type": "keyword"},
-                    }
+                    },
                 }
             },
         )
@@ -257,9 +271,7 @@ def semantic_search_elasticsearch(
 
             for i in range(start_idx, end_idx):
                 tokens = dict(corpus_embeddings_decoded[i])
-                tokens = {
-                    str(k).replace(".", "_"): v for k, v in tokens.items()
-                }  # Seems that Elasticsearch doesn't handle "." in the token names
+                tokens = {_encode_elasticsearch_token(k, token_encoding): v for k, v in tokens.items()}
 
                 actions.append(
                     {
@@ -277,6 +289,26 @@ def semantic_search_elasticsearch(
 
         es.indices.refresh(index=index_name)
         corpus_index = (es, index_name)
+    else:
+        es, index_name = corpus_index
+        mappings = es.indices.get_mapping(
+            index=index_name, filter_path="*.mappings._meta,*.mappings.properties.tokens"
+        )
+        encodings = [
+            value.get("mappings", {}).get("_meta", {}).get("sentence_transformers_token_encoding")
+            for value in mappings.values()
+        ]
+        token_encoding = encodings[0] if encodings else None
+        if any(encoding != token_encoding for encoding in encodings):
+            raise ValueError(
+                "The Elasticsearch indices use different token encodings. Search them separately or rebuild them "
+                "from the original decoded corpus with the same encoding."
+            )
+        if token_encoding not in (None, _ELASTICSEARCH_TOKEN_ENCODING):
+            raise ValueError(
+                f"Unsupported Elasticsearch token encoding {token_encoding!r}. Use a compatible "
+                "sentence-transformers version or rebuild the index from the original decoded corpus."
+            )
 
     es, index_name = corpus_index
     all_results = []
@@ -284,9 +316,7 @@ def semantic_search_elasticsearch(
 
     for q_idx in range(len(query_embeddings_decoded)):
         query_tokens = dict(query_embeddings_decoded[q_idx])
-        query_tokens = {
-            str(k).replace(".", "_"): v for k, v in query_tokens.items()
-        }  # Seems that Elasticsearch doesn't handle "." in the token names
+        query_tokens = {_encode_elasticsearch_token(k, token_encoding): v for k, v in query_tokens.items()}
 
         # Build query using rank_feature queries
         should_clauses = []
