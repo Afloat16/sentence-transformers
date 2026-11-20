@@ -232,6 +232,8 @@ class BaseTrainer(Trainer, ABC):
         if args.hub_model_id and not model.model_card_data.model_id:
             model.model_card_data.set_model_id(args.hub_model_id)
 
+        infer_processing_class = processing_class is None
+        create_data_collator = data_collator is None
         if (
             processing_class is None
             and hasattr(model, "processor")
@@ -291,6 +293,14 @@ class BaseTrainer(Trainer, ABC):
             optimizer_cls_and_kwargs=optimizer_cls_and_kwargs,
             preprocess_logits_for_metrics=preprocess_logits_for_metrics,
         )
+        # The parent constructor can call model_init again. Track only the
+        # preprocessing components we created, leaving explicit overrides alone.
+        if infer_processing_class:
+            self._model_processing_class = self.processing_class
+        if create_data_collator:
+            self._model_data_collator = self.data_collator
+        if self.model is not model:
+            self._refresh_model_preprocessing(self.model)
         # If the eval_dataset is "dummy", then we set it back to None
         if self.eval_dataset == "dummy":
             self.eval_dataset = None
@@ -414,6 +424,7 @@ class BaseTrainer(Trainer, ABC):
 
     def call_model_init(self, trial=None) -> BaseModel:
         model = super().call_model_init(trial=trial)
+        self._refresh_model_preprocessing(model)
         # If the Trainer already has a loss, then we'll want to override the model in the loss function
         if not hasattr(self, "loss"):
             return model
@@ -436,6 +447,35 @@ class BaseTrainer(Trainer, ABC):
         elif hasattr(self.loss, "model"):
             self.loss = self.override_model_in_loss(self.loss, model)
         return model
+
+    def _refresh_model_preprocessing(self, model: BaseModel) -> None:
+        """Keep automatically created preprocessing aligned with model_init."""
+        if hasattr(self, "_model_processing_class"):
+            if self.processing_class is self._model_processing_class:
+                processor = getattr(model, "processor", None)
+                if not isinstance(
+                    processor, (PreTrainedTokenizerBase, BaseImageProcessor, FeatureExtractionMixin, ProcessorMixin)
+                ):
+                    processor = None
+                self.processing_class = self._model_processing_class = processor
+            else:
+                # A caller replaced the inferred processor after construction.
+                del self._model_processing_class
+
+        if hasattr(self, "callback_handler"):
+            self.callback_handler.processing_class = self.processing_class
+
+        if hasattr(self, "_model_data_collator"):
+            if self.data_collator is self._model_data_collator:
+                self.data_collator = self._model_data_collator = self.get_data_collator(
+                    model=model, args=self.args, processing_class=self.processing_class
+                )
+                # Persistent evaluation workers keep their own copy of the old
+                # collator; the next evaluation must construct a fresh loader.
+                if hasattr(self, "_eval_dataloaders"):
+                    self._eval_dataloaders.clear()
+            else:
+                del self._model_data_collator
 
     def override_model_in_loss(self, loss: torch.nn.Module, model: BaseModel) -> torch.nn.Module:
         from sentence_transformers.base.model import BaseModel
