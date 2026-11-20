@@ -31,9 +31,10 @@ def _reference_loss(embeddings, labels, distance_metric, margin):
     ids=["euclidean", "cosine"],
 )
 @pytest.mark.parametrize("case", ["balanced", "uneven", "no_positives", "no_negatives"])
-def test_batch_all_matches_explicit_triplets(distance_metric, case):
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_batch_all_matches_explicit_triplets(distance_metric, case, dtype):
     generator = torch.Generator().manual_seed(42)
-    embeddings = torch.randn(8, 4, generator=generator)
+    embeddings = torch.randn(8, 4, generator=generator, dtype=dtype)
     labels = torch.arange(8) // 2
     if case == "uneven":
         labels = torch.tensor([0, 0, 0, 1, 1, 2, 3, 3])
@@ -54,6 +55,17 @@ def test_batch_all_matches_explicit_triplets(distance_metric, case):
     torch.testing.assert_close(embeddings.grad, reference_embeddings.grad)
     assert torch.isfinite(actual)
     assert torch.isfinite(embeddings.grad).all()
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_batch_all_with_only_easy_triplets(dtype):
+    embeddings = torch.tensor([[0.0], [0.1], [10.0], [10.1]], dtype=dtype, requires_grad=True)
+    labels = torch.tensor([0, 0, 1, 1])
+    loss = BatchAllTripletLoss(nn.Identity(), margin=1.0).compute_loss_from_embeddings([embeddings], labels)
+    loss.backward()
+
+    torch.testing.assert_close(loss, torch.zeros((), dtype=dtype))
+    torch.testing.assert_close(embeddings.grad, torch.zeros_like(embeddings))
 
 
 def test_batch_all_does_not_save_a_cube_for_paired_labels():
