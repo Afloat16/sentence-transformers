@@ -5,12 +5,14 @@ import os
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any
 
+import torch
+from torch import Tensor
+
 from sentence_transformers.sentence_transformer.evaluation import MSEEvaluator
 from sentence_transformers.util import append_to_last_row
 
 if TYPE_CHECKING:
     import numpy as np
-    from torch import Tensor
 
     from sentence_transformers.sparse_encoder import SparseEncoder
 
@@ -21,7 +23,8 @@ class SparseMSEEvaluator(MSEEvaluator):
     """
     This evaluator extends :class:`~sentence_transformers.sentence_transformer.evaluation.MSEEvaluator` but is specifically designed for sparse encoder models.
 
-    Note that this evaluator doesn't take benefit of the sparse tensor torch representation yet, so memory issues may occur.
+    Teacher embeddings and evaluation differences are kept sparse, so their storage scales with the number of active
+    dimensions rather than the full vocabulary size. Implicit zero entries are included in the mean squared error.
 
     Computes the mean squared error (x100) between the computed sentence embedding
     and some target sentence embedding.
@@ -105,9 +108,6 @@ class SparseMSEEvaluator(MSEEvaluator):
             write_csv=write_csv,
         )
         self.csv_headers.extend(["active_dims", "sparsity_ratio"])
-        logger.warning(
-            "The SparseMSEEvaluator is not handling the mse compute with sparse tensors yet. Memory issues may occur."
-        )
 
     def __call__(
         self,
@@ -134,6 +134,15 @@ class SparseMSEEvaluator(MSEEvaluator):
 
         return metrics
 
+    def _compute_mse(self, source_embeddings: Tensor, target_embeddings: Tensor) -> float:
+        # CPU COO subtraction does not support float16; use at least float32 while preserving float64 inputs.
+        dtype = torch.promote_types(
+            torch.promote_types(source_embeddings.dtype, target_embeddings.dtype), torch.float32
+        )
+        difference = (source_embeddings.to(dtype).to_sparse() - target_embeddings.to(dtype).to_sparse()).coalesce()
+        mse = difference.values().square().sum() / difference.numel()
+        return (mse * 100).item()
+
     def embed_inputs(
         self,
         model: SparseEncoder,
@@ -144,7 +153,7 @@ class SparseMSEEvaluator(MSEEvaluator):
             sentences,
             batch_size=self.batch_size,
             show_progress_bar=self.show_progress_bar,
-            convert_to_sparse_tensor=False,
+            convert_to_sparse_tensor=True,
             save_to_cpu=True,
             max_active_dims=self.max_active_dims,
             **kwargs,

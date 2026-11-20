@@ -9,6 +9,7 @@ from sentence_transformers.base.evaluation.evaluator import BaseEvaluator
 
 if TYPE_CHECKING:
     import numpy as np
+    from torch import Tensor
 
     from sentence_transformers.sentence_transformer.model import SentenceTransformer
 
@@ -117,8 +118,7 @@ class MSEEvaluator(BaseEvaluator):
 
         target_embeddings = self.embed_inputs(model, self.target_sentences)
 
-        mse = ((self.source_embeddings - target_embeddings) ** 2).mean()
-        mse = (mse * 100).item()
+        mse = self._compute_mse(self.source_embeddings, target_embeddings)
 
         logger.info(f"MSE evaluation (lower = better) on the {self.name} dataset{out_txt}:")
         logger.info(f"MSE (*100):\t{mse:4f}")
@@ -139,6 +139,11 @@ class MSEEvaluator(BaseEvaluator):
         metrics = self.prefix_name_to_metrics(metrics, self.name)
         self.store_metrics_in_model_card_data(model, metrics, epoch, steps)
         return metrics
+
+    def _compute_mse(self, source_embeddings: np.ndarray | Tensor, target_embeddings: np.ndarray | Tensor) -> float:
+        """Compute MSE scaled by 100, allowing subclasses to preserve their embedding representation."""
+        mse = ((source_embeddings - target_embeddings) ** 2).mean()
+        return (mse * 100).item()
 
     def embed_inputs(
         self,
