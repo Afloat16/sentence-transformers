@@ -367,14 +367,26 @@ class RerankingEvaluator(BaseEvaluator):
             encode_fn = model.encode_query
         elif encode_fn_name == "document":
             encode_fn = model.encode_document
-        return encode_fn(
-            sentences,
+
+        text_to_idx = None
+        if isinstance(sentences, list) and all(isinstance(sentence, str) for sentence in sentences):
+            unique_texts = dict.fromkeys(sentences)
+            if len(unique_texts) < len(sentences):
+                text_to_idx = {text: idx for idx, text in enumerate(unique_texts)}
+
+        embeddings = encode_fn(
+            list(text_to_idx) if text_to_idx is not None else sentences,
             batch_size=self.batch_size,
             show_progress_bar=show_progress_bar,
             convert_to_tensor=True,
             truncate_dim=self.truncate_dim,
             **kwargs,
         )
+        if text_to_idx is not None:
+            # Keep every candidate occurrence in its original position; only reuse its encoding.
+            indices = torch.tensor([text_to_idx[text] for text in sentences], device=embeddings.device)
+            embeddings = embeddings.index_select(0, indices)
+        return embeddings
 
     def get_config_dict(self):
         config_dict = {"at_k": self.at_k}
