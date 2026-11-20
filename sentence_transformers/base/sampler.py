@@ -287,6 +287,9 @@ class GroupByLabelBatchSampler(DefaultBatchSampler):
         labels = self._determine_labels_to_use(dataset, self.valid_label_columns)
         groups: dict[Any, list[int]] = defaultdict(list)
         for sample_idx, label in enumerate(labels):
+            # Scalar tensors hash by identity, even when their label values are equal.
+            if isinstance(label, torch.Tensor) and label.ndim == 0:
+                label = label.item()
             groups[label].append(sample_idx)
 
         self.groups = {label: indices for label, indices in groups.items() if len(indices) >= 2}

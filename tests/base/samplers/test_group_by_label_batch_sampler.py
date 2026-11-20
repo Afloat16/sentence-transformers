@@ -276,3 +276,93 @@ def test_odd_label_groups_do_not_permanently_exclude_samples() -> None:
         assert list(sampler) == batches
 
     assert seen == set(range(len(dataset)))
+
+
+@pytest.mark.parametrize("dataset_format", [None, "numpy", "torch"])
+@pytest.mark.parametrize(
+    "label_values",
+    [(2**53, 2**53 + 1), (0.25, 1.5), (False, True), ("first", "second")],
+    ids=["large-integer", "float", "boolean", "string"],
+)
+def test_formatted_label_groups_match_python_values(dataset_format, label_values) -> None:
+    labels = [label_values[0]] * 4 + [label_values[1]] * 4
+    dataset = Dataset.from_dict({"label": labels})
+    epoch_batches = []
+    for source in (dataset, dataset.with_format(dataset_format)):
+        sampler = GroupByLabelBatchSampler(
+            source,
+            batch_size=4,
+            drop_last=False,
+            valid_label_columns=["label"],
+            generator=torch.Generator(),
+            seed=23,
+        )
+        batches = []
+        for epoch in (0, 3):
+            sampler.set_epoch(epoch)
+            batches.append(list(sampler))
+            assert len(batches[-1]) == len(sampler) == 2
+            for batch in batches[-1]:
+                assert sorted(Counter(labels[index] for index in batch).values()) == [2, 2]
+        epoch_batches.append(batches)
+    assert epoch_batches[0] == epoch_batches[1]
+
+
+def test_transformed_label_groups_use_scalar_tensor_values() -> None:
+    dataset = Dataset.from_dict({"label": [0, 2, 1, 3]})
+
+    def transform(batch):
+        return {**batch, "label": torch.tensor(batch["label"]) % 2}
+
+    transformed = dataset.with_transform(transform)
+    sampler = GroupByLabelBatchSampler(transformed, batch_size=4, drop_last=False, valid_label_columns=["label"])
+    batches = list(sampler)
+    assert len(batches) == len(sampler) == 1
+    assert set(batches[0]) == {0, 1, 2, 3}
+    assert sorted(Counter(transformed[index]["label"].item() for index in batches[0]).values()) == [2, 2]
+
+
+def test_triplet_training_tensor_formatted_labels(tmp_path) -> None:
+    pytest.importorskip("accelerate")
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from tokenizers.pre_tokenizers import Whitespace
+
+    from sentence_transformers import (
+        SentenceTransformer,
+        SentenceTransformerTrainer,
+        SentenceTransformerTrainingArguments,
+    )
+    from sentence_transformers.base.training_args import BatchSamplers
+    from sentence_transformers.sentence_transformer.losses import BatchHardTripletLoss
+    from sentence_transformers.sentence_transformer.modules import StaticEmbedding
+
+    tokenizer = Tokenizer(WordLevel({"[UNK]": 0, "a": 1, "b": 2, "c": 3, "d": 4}, unk_token="[UNK]"))
+    tokenizer.pre_tokenizer = Whitespace()
+    initial_weights = torch.tensor([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [2.0, 0.0]])
+    model = SentenceTransformer(
+        modules=[StaticEmbedding(tokenizer, embedding_weights=initial_weights.clone())], device="cpu"
+    )
+    model.model_card_data.generate_widget_examples = False
+    dataset = Dataset.from_dict({"sentence": ["a", "b", "c", "d"], "label": [0, 0, 1, 1]}).with_format("torch")
+    trainer = SentenceTransformerTrainer(
+        model=model,
+        args=SentenceTransformerTrainingArguments(
+            output_dir=str(tmp_path),
+            max_steps=1,
+            per_device_train_batch_size=4,
+            learning_rate=0.1,
+            optim="sgd",
+            batch_sampler=BatchSamplers.GROUP_BY_LABEL,
+            save_strategy="no",
+            report_to=[],
+            use_cpu=True,
+            disable_tqdm=True,
+        ),
+        train_dataset=dataset,
+        loss=BatchHardTripletLoss(model),
+    )
+    result = trainer.train()
+    assert result.global_step == 1
+    assert 0 < result.training_loss < float("inf")
+    assert not torch.equal(next(model.parameters()).detach(), initial_weights)
