@@ -459,9 +459,12 @@ class HierarchicalTokenPooling(BaseTokenPooling):
                 if self.normalize_embeddings:
                     pooled_embeddings = _normalize_token_embeddings(pooled_embeddings)
 
-                pooled_documents.extend(
-                    embedding[:length] for embedding, length in zip(pooled_embeddings, pooled_lengths.tolist())
-                )
+                output_lengths = pooled_lengths.tolist()
+                pooled_batch = [embedding[:length] for embedding, length in zip(pooled_embeddings, output_lengths)]
+                if sum(output_lengths) < pooled_embeddings.shape[0] * pooled_embeddings.shape[1]:
+                    # Pack retained rows so long-lived index tensors do not keep output padding alive.
+                    pooled_batch = list(torch.cat(pooled_batch).split(output_lengths))
+                pooled_documents.extend(pooled_batch)
 
         return pooled_documents
 

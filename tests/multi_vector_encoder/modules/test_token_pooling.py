@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import pickle
 import sys
+from io import BytesIO
 from itertools import combinations
 
 import pytest
@@ -120,6 +121,43 @@ class TestPoolShapeInvariants:
 
 
 class TestHierarchicalTokenPooling:
+    @pytest.mark.parametrize("mode", ["factor", "max_tokens", "adaptive"])
+    @pytest.mark.parametrize("normalize_embeddings", [False, True])
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+    def test_pooled_documents_do_not_retain_padding(self, mode, normalize_embeddings, dtype):
+        documents = [_normed((length, 8)).to(dtype) for length in [0, 1, 16, 32]]
+        originals = [document.clone() for document in documents]
+        if mode == "adaptive":
+            threshold = HierarchicalTokenPooling.calibrate_distance_threshold(documents, target_tokens=3)
+            kwargs = {"distance_threshold": threshold}
+        elif mode == "max_tokens":
+            kwargs = {"max_tokens": 4}
+        else:
+            kwargs = {"pool_factor": 2}
+        pooling = HierarchicalTokenPooling(**kwargs, normalize_embeddings=normalize_embeddings, use_kernels=False)
+        pooled = pooling.pool(documents)
+
+        # Retaining the corpus, or saving it, must not keep unused slots in the padded batch alive.
+        def retained_bytes(embeddings):
+            storages = {
+                embedding.untyped_storage().data_ptr(): embedding.untyped_storage().nbytes()
+                for embedding in embeddings
+            }
+            return sum(storages.values())
+
+        output_bytes = sum(embedding.numel() * embedding.element_size() for embedding in pooled)
+        assert retained_bytes(pooled) == output_bytes
+        buffer = BytesIO()
+        torch.save(pooled, buffer)
+        buffer.seek(0)
+        restored = torch.load(buffer, weights_only=True)
+        assert retained_bytes(restored) == output_bytes
+        for actual, saved in zip(pooled, restored):
+            torch.testing.assert_close(actual, saved, rtol=0, atol=0)
+            assert actual.dtype == dtype
+        for original, document in zip(originals, documents):
+            torch.testing.assert_close(document, original, rtol=0, atol=0)
+
     @pytest.mark.parametrize("normalize_embeddings", [False, True])
     def test_pool_matches_scipy_clustering(self, normalize_embeddings: bool) -> None:
         emb = _normed((15, 8))
