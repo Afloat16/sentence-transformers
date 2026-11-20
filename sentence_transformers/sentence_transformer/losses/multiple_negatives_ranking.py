@@ -279,8 +279,9 @@ class MultipleNegativesRankingLoss(nn.Module):
             # (bs, bs * ws * (1 + nn))
             sim_matrices["doc_to_doc"] = self.similarity_fct(docs_all, local_docs).T
             # Remove d_i_a -> d_i_b for all documents belonging to the same query
-            same_query_doc_mask = torch.eye(world_batch_size, device=queries.device)[local_indices]
-            same_query_doc_mask = same_query_doc_mask.repeat(1, len(docs)).bool()
+            same_query_doc_mask = torch.zeros(batch_size, world_batch_size, dtype=torch.bool, device=queries.device)
+            same_query_doc_mask[row_indices, local_indices] = True
+            same_query_doc_mask = same_query_doc_mask.repeat(1, len(docs))
             sim_matrices["doc_to_doc"].masked_fill_(same_query_doc_mask, -torch.inf)
 
         # Compute hardness penalties on the unscaled (raw cosine) similarities (Lan et al. 2025, Eq. 5).
@@ -294,7 +295,8 @@ class MultipleNegativesRankingLoss(nn.Module):
             penalty = self.hardness_strength * sim_matrices["query_to_doc"].detach()
 
             # True where the document belongs to the same query (own positive + own hard negatives)
-            own_doc_mask = torch.eye(world_batch_size, device=queries.device, dtype=torch.bool)[local_indices]
+            own_doc_mask = torch.zeros(batch_size, world_batch_size, dtype=torch.bool, device=queries.device)
+            own_doc_mask[row_indices, local_indices] = True
             own_doc_mask = own_doc_mask.repeat(1, len(docs))
 
             if self.hardness_mode == "hard_negatives":
