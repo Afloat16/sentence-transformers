@@ -58,17 +58,18 @@ class GISTEmbedLoss(nn.Module):
             - For further details, see: https://huggingface.co/papers/2402.16829
 
         Requirements:
-            1. (anchor, positive, negative) triplets
-            2. (anchor, positive) pairs
+            1. (anchor, positive) pairs, optionally followed by one or more explicit negative columns
 
         Inputs:
-            +---------------------------------------+--------+
-            | Inputs                                | Labels |
-            +=======================================+========+
-            | (anchor, positive, negative) triplets | none   |
-            +---------------------------------------+--------+
-            | (anchor, positive) pairs              | none   |
-            +---------------------------------------+--------+
+            +-------------------------------------------------+--------+
+            | Inputs                                          | Labels |
+            +=================================================+========+
+            | (anchor, positive) pairs                        | none   |
+            +-------------------------------------------------+--------+
+            | (anchor, positive, negative) triplets            | none   |
+            +-------------------------------------------------+--------+
+            | (anchor, positive, negative_1, ..., negative_n)  | none   |
+            +-------------------------------------------------+--------+
 
         Recommendations:
             - Use ``BatchSamplers.NO_DUPLICATES`` (:class:`docs <sentence_transformers.base.sampler.BatchSamplers>`) to
@@ -159,17 +160,10 @@ class GISTEmbedLoss(nn.Module):
 
             guide_embeddings = embed_columns(self.guide, guide_features)
 
-        negative = None
-        negative_guide = None
-
-        if len(embeddings) == 2:
-            anchor, positive = embeddings
-            anchor_guide, positive_guide = guide_embeddings
-        elif len(embeddings) == 3:
-            anchor, positive, negative = embeddings
-            anchor_guide, positive_guide, negative_guide = guide_embeddings
-        else:
-            raise ValueError(f"Expected 2 or 3 embeddings, got {len(embeddings)}")
+        if len(embeddings) < 2:
+            raise ValueError(f"Expected at least 2 embeddings (anchor and positive), got {len(embeddings)}")
+        anchor, positive, *negatives = embeddings
+        anchor_guide, positive_guide, *negative_guides = guide_embeddings
         batch_size = anchor.size(0)
         offset = 0
 
@@ -179,10 +173,9 @@ class GISTEmbedLoss(nn.Module):
             # embeddings can flow back to the original devices.
             positive = all_gather_with_grad(positive)
             positive_guide = all_gather_with_grad(positive_guide)
-            if negative is not None:
-                negative = all_gather_with_grad(negative)
-                negative_guide = all_gather_with_grad(negative_guide)
-            # All have this shape: (batch_size * world_size * (1 + num_negatives), embedding_dim)
+            negatives = [all_gather_with_grad(negative) for negative in negatives]
+            negative_guides = [all_gather_with_grad(negative_guide) for negative_guide in negative_guides]
+            # Each candidate column has shape (batch_size * world_size, embedding_dim).
 
             # get_rank() returns 0 when not running distributed, so offset stays 0 in that case.
             offset = get_rank() * batch_size
@@ -233,8 +226,8 @@ class GISTEmbedLoss(nn.Module):
             pp_sim[rows, offset + rows] = -torch.inf  # No self-negative
             scores.append(pp_sim)
 
-        # Handle the case where we have a negative sample
-        if negative is not None:
+        # Apply the same false-negative filtering to every explicit negative column.
+        for negative, negative_guide in zip(negatives, negative_guides):
             an_sim = self.sim_matrix(anchor, negative)
             guided_an_sim = self.sim_matrix(anchor_guide, negative_guide)
             an_sim = mask_false_negatives(guided_an_sim, an_sim)  # anchor-negative

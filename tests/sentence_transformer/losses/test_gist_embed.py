@@ -5,6 +5,7 @@ import math
 import pytest
 import torch
 
+import sentence_transformers.sentence_transformer.losses.cached_gist_embed as cge
 import sentence_transformers.sentence_transformer.losses.gist_embed as ge
 from sentence_transformers.sentence_transformer.losses import CachedGISTEmbedLoss, GISTEmbedLoss
 
@@ -180,3 +181,75 @@ def test_self_pairs_are_excluded_when_guide_scores_tie(loss_class, stsb_bert_tin
     loss.backward()
 
     assert loss.item() == 0.0
+
+
+@pytest.mark.parametrize("num_negatives", [0, 1, 3])
+@pytest.mark.parametrize("margin_strategy", ["absolute", "relative"])
+@pytest.mark.parametrize("contrast", [False, True])
+@pytest.mark.parametrize("gather", [False, True])
+def test_multiple_negatives_match_cached_loss_and_gradients(
+    num_negatives, margin_strategy, contrast, gather, monkeypatch
+):
+    batch_size, dimension = 3, 6
+    generator = torch.Generator().manual_seed(42)
+    embeddings = [
+        torch.randn(batch_size, dimension, generator=generator, dtype=torch.float64).requires_grad_()
+        for _ in range(2 + num_negatives)
+    ]
+    guide_embeddings = [torch.eye(batch_size, dimension, dtype=torch.float64) for _ in range(2)]
+    guide_embeddings.extend(
+        torch.randn(batch_size, dimension, generator=generator, dtype=torch.float64) for _ in range(num_negatives)
+    )
+    if num_negatives:
+        # This explicit negative is a false negative for anchor 0, so its guide score must be filtered.
+        guide_embeddings[-1][0] = guide_embeddings[0][0]
+
+    def fake_gather(tensor):
+        remote = torch.full_like(tensor, 0.25)
+        return torch.cat([remote, tensor])
+
+    for module in (ge, cge):
+        monkeypatch.setattr(module, "all_gather_with_grad", fake_gather)
+        monkeypatch.setattr(module, "get_rank", lambda: 1)
+
+    loss_fn = _make_loss(margin=0.1)
+    loss_fn.temperature = 0.1
+    loss_fn.margin_strategy = margin_strategy
+    loss_fn.contrast_anchors = loss_fn.contrast_positives = contrast
+    loss_fn.gather_across_devices = gather
+    loss_fn.guide = lambda features: {"sentence_embedding": features["guide_embedding"]}
+
+    cached = CachedGISTEmbedLoss.__new__(CachedGISTEmbedLoss)
+    torch.nn.Module.__init__(cached)
+    for name in (
+        "temperature",
+        "similarity_fct",
+        "margin_strategy",
+        "margin",
+        "contrast_anchors",
+        "contrast_positives",
+        "gather_across_devices",
+        "cross_entropy_loss",
+    ):
+        setattr(cached, name, getattr(loss_fn, name))
+    cached.mini_batch_size = 2
+    cached.show_progress_bar = False
+
+    actual = loss_fn(
+        [
+            {"sentence_embedding": embedding, "guide_embedding": guide_embedding}
+            for embedding, guide_embedding in zip(embeddings, guide_embeddings)
+        ],
+        labels=None,
+    )
+    expected = cached.calculate_loss(
+        [[embedding] for embedding in embeddings], [[guide] for guide in guide_embeddings]
+    )
+    torch.testing.assert_close(actual, expected)
+
+    actual_grads = torch.autograd.grad(actual, embeddings, retain_graph=True)
+    expected_grads = torch.autograd.grad(expected, embeddings)
+    for actual_grad, expected_grad in zip(actual_grads, expected_grads):
+        assert torch.isfinite(actual_grad).all()
+        assert actual_grad.count_nonzero() > 0
+        torch.testing.assert_close(actual_grad, expected_grad)
