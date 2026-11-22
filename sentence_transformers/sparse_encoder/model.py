@@ -1373,8 +1373,20 @@ class SparseEncoder(BaseModel):
         if embeddings_2.ndim == 1:
             intersection = embeddings_1 * embeddings_2
         elif embeddings_2.ndim == 2:
-            # Element-wise multiplication per row. Python loop is required as sparse broadcasting is limited
-            intersection = torch.stack([embeddings_1 * embedding for embedding in embeddings_2])
+            # Match stored document coordinates against the query once, without selecting every sparse row.
+            embeddings_1 = embeddings_1.coalesce()
+            embeddings_2 = embeddings_2.coalesce()
+            query_indices = embeddings_1.indices()[0]
+            document_indices = embeddings_2.indices()
+            if query_indices.numel():
+                positions = torch.searchsorted(query_indices, document_indices[1]).clamp_max(query_indices.numel() - 1)
+                shared = query_indices[positions] == document_indices[1]
+                indices = document_indices[:, shared]
+                values = embeddings_1.values()[positions[shared]] * embeddings_2.values()[shared]
+            else:
+                indices = document_indices[:, :0]
+                values = embeddings_1.values()[:0] * embeddings_2.values()[:0]
+            intersection = torch.sparse_coo_tensor(indices, values, embeddings_2.shape, device=embeddings_2.device)
         else:
             raise ValueError(f"Expected 1D or 2D tensor for embeddings_2, but got {embeddings_2.shape} shape.")
 
