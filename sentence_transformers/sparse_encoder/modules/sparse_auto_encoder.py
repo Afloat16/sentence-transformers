@@ -191,7 +191,7 @@ class SparseAutoEncoder(Module):
         latents_pre_act = self.encode_pre_act(x_prepared)
 
         latents_k, latents_auxk = self.top_k(latents_pre_act, k)
-        latents_4k, _ = self.top_k(latents_pre_act, 4 * k)
+        latents_4k, _ = self.top_k(latents_pre_act, 4 * k, compute_aux=False)
 
         recons_k = self.decode(latents_k, info)
         recons_4k = self.decode(latents_4k, info)
