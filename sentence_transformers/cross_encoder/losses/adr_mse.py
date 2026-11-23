@@ -2,9 +2,19 @@ from __future__ import annotations
 
 import torch
 from torch import Tensor, nn
+from torch.utils.checkpoint import checkpoint
 
 from sentence_transformers.cross_encoder import CrossEncoder
 from sentence_transformers.util import batch_to_device, fullname
+
+
+def _approximate_rank_chunk(
+    scores: Tensor, row_scores: Tensor, mask: Tensor, row_mask: Tensor, alpha: float | Tensor
+) -> Tensor:
+    score_diffs = scores.unsqueeze(1) - row_scores.unsqueeze(2)
+    pairwise = torch.sigmoid(alpha * score_diffs) * mask.unsqueeze(1).float()
+    # Each valid diagonal contributes sigmoid(0) = 0.5. Exclude that self-term.
+    return 1.0 + pairwise.sum(dim=2) - 0.5 * row_mask.float()
 
 
 class ADRMSELoss(nn.Module):
@@ -14,6 +24,7 @@ class ADRMSELoss(nn.Module):
         alpha: float = 1.0,
         activation_fn: nn.Module | None = nn.Identity(),
         mini_batch_size: int | None = None,
+        rank_chunk_size: int | None = None,
     ) -> None:
         r"""
         ADR-MSE (Approx Discounted Rank Mean Squared Error) listwise ranking loss for cross-encoders.
@@ -51,6 +62,13 @@ class ADRMSELoss(nn.Module):
                 - If ``mini_batch_size`` is <= 0, the entire batch is processed at once.
 
                 Defaults to None.
+            rank_chunk_size (int, optional): Maximum number of document rows whose pairwise rank
+                comparisons are computed together. A positive value bounds the pairwise tensors for
+                both target and predicted ranks. During backward, predicted-rank chunks are recomputed
+                with non-reentrant gradient checkpointing instead of retaining their sigmoid matrices.
+                This trades extra computation for memory independently of the encoder's ``mini_batch_size``.
+                Defaults to None, which keeps the unchunked computation. Leave this as None when using
+                ``torch.func`` transforms, which do not support gradient checkpointing.
 
         References:
             - Rank-DistiLLM: Closing the Effectiveness Gap Between Cross-Encoders and LLMs for Passage Re-Ranking: https://huggingface.co/papers/2405.07920
@@ -107,6 +125,9 @@ class ADRMSELoss(nn.Module):
         self.alpha = alpha
         self.activation_fn = activation_fn or nn.Identity()
         self.mini_batch_size = mini_batch_size
+        if rank_chunk_size is not None and (not isinstance(rank_chunk_size, int) or rank_chunk_size <= 0):
+            raise ValueError("rank_chunk_size must be a positive integer or None.")
+        self.rank_chunk_size = rank_chunk_size
 
         if self.model.num_labels != 1:
             raise ValueError(
@@ -120,10 +141,21 @@ class ADRMSELoss(nn.Module):
         For each document i: ``approx_rank(i) = 1 + sum_{j != i} sigmoid(alpha * (s_j - s_i))``.
         Higher scores get lower (better) ranks. Padded positions are excluded via the mask.
         """
-        score_diffs = scores.unsqueeze(1) - scores.unsqueeze(2)
-        pairwise = torch.sigmoid(self.alpha * score_diffs) * mask.unsqueeze(1).float()
-        # Each valid diagonal contributes sigmoid(0) = 0.5. Subtract it to exclude the self-term
-        return 1.0 + pairwise.sum(dim=2) - 0.5 * mask.float()
+        if self.rank_chunk_size is None or scores.shape[1] <= self.rank_chunk_size:
+            return _approximate_rank_chunk(scores, scores, mask, mask, self.alpha)
+
+        ranks = []
+        checkpoint_ranks = torch.is_grad_enabled() and (
+            scores.requires_grad or (isinstance(self.alpha, Tensor) and self.alpha.requires_grad)
+        )
+        for begin in range(0, scores.shape[1], self.rank_chunk_size):
+            end = begin + self.rank_chunk_size
+            args = (scores, scores[:, begin:end], mask, mask[:, begin:end], self.alpha)
+            if checkpoint_ranks:
+                ranks.append(checkpoint(_approximate_rank_chunk, *args, use_reentrant=False, preserve_rng_state=False))
+            else:
+                ranks.append(_approximate_rank_chunk(*args))
+        return torch.cat(ranks, dim=1)
 
     def forward(
         self,
@@ -201,11 +233,14 @@ class ADRMSELoss(nn.Module):
         # can attain when the model assigns tied docs equal scores. Padded positions are
         # excluded from the counts via the mask and are masked out of the loss later.
         labels_j = labels_matrix.unsqueeze(1)
-        labels_i = labels_matrix.unsqueeze(2)
         valid_j = mask.unsqueeze(1)
-        greater = ((labels_j > labels_i) & valid_j).sum(dim=-1).float()
-        equal = ((labels_j == labels_i) & valid_j).sum(dim=-1).float()
-        true_ranks = greater + (equal + 1.0) / 2.0
+        true_rank_chunks = []
+        for row_labels in labels_matrix.split(self.rank_chunk_size or max_docs, dim=1):
+            labels_i = row_labels.unsqueeze(2)
+            greater = ((labels_j > labels_i) & valid_j).sum(dim=-1).float()
+            equal = ((labels_j == labels_i) & valid_j).sum(dim=-1).float()
+            true_rank_chunks.append(greater + (equal + 1.0) / 2.0)
+        true_ranks = torch.cat(true_rank_chunks, dim=1)
 
         approx_ranks = self.approximate_ranks(logits_matrix, mask)
 
@@ -223,6 +258,7 @@ class ADRMSELoss(nn.Module):
             "alpha": self.alpha,
             "activation_fn": fullname(self.activation_fn),
             "mini_batch_size": self.mini_batch_size,
+            "rank_chunk_size": self.rank_chunk_size,
         }
 
     @property
