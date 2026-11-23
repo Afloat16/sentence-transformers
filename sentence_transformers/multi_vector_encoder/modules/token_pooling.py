@@ -459,9 +459,16 @@ class HierarchicalTokenPooling(BaseTokenPooling):
                 if self.normalize_embeddings:
                     pooled_embeddings = _normalize_token_embeddings(pooled_embeddings)
 
-                pooled_documents.extend(
-                    embedding[:length] for embedding, length in zip(pooled_embeddings, pooled_lengths.tolist())
-                )
+                output_lengths = pooled_lengths.tolist()
+                if any(length != pooled_embeddings.shape[1] for length in output_lengths):
+                    # Sliced views keep the whole padded batch alive in a stored
+                    # document index. Pack valid rows once before returning views.
+                    compact = torch.cat(
+                        [embedding[:length] for embedding, length in zip(pooled_embeddings, output_lengths)]
+                    )
+                    pooled_documents.extend(compact.split(output_lengths))
+                else:
+                    pooled_documents.extend(pooled_embeddings.unbind())
 
         return pooled_documents
 
