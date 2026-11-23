@@ -248,9 +248,12 @@ class Pooling(Module):
                     attention_mask = attention_mask.to(torch.int32)
                 values, indices = attention_mask.flip(1).max(1)
                 indices = torch.where(values == 0, seq_len - 1, indices)
-                gather_indices = (seq_len - indices - 1).unsqueeze(-1).unsqueeze(1).expand(-1, 1, hidden_dim)
-                mask = attention_mask.unsqueeze(-1).expand_as(token_embeddings).to(token_embeddings.dtype)
-                output_vectors.append(torch.gather(token_embeddings * mask, 1, gather_indices).squeeze(dim=1))
+                token_indices = (seq_len - indices - 1).unsqueeze(-1)
+                gather_indices = token_indices.unsqueeze(1).expand(-1, 1, hidden_dim)
+                # Only the selected token needs masking; avoid a full (batch, tokens, hidden) product.
+                selected = torch.gather(token_embeddings, 1, gather_indices).squeeze(dim=1)
+                mask = torch.gather(attention_mask, 1, token_indices).to(token_embeddings.dtype)
+                output_vectors.append(selected * mask)
 
         return output_vectors
 
