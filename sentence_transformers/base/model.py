@@ -18,6 +18,7 @@ from copy import deepcopy
 from functools import cached_property
 from itertools import chain
 from multiprocessing import Queue
+from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -1913,7 +1914,8 @@ This pull request has been automatically generated to add {self.__class__.__name
         self.to("cpu")
         self.share_memory()
         ctx = mp.get_context("spawn")
-        input_queue = ctx.Queue()
+        # Serialized chunks own their bytes, so keep only a bounded number waiting for workers.
+        input_queue = ctx.Queue(maxsize=max(1, 2 * len(target_devices)))
         output_queue = ctx.Queue()
         processes = []
         pool = {"input": input_queue, "output": output_queue, "processes": processes}
@@ -2035,7 +2037,23 @@ This pull request has been automatically generated to add {self.__class__.__name
             chunk_starts = range(0, len(inputs), chunk_size)
             num_chunks = len(chunk_starts)
             for chunk_id, start in enumerate(chunk_starts):
-                input_queue.put([chunk_id, inputs[start : start + chunk_size], kwargs])
+                try:
+                    payload = bytes(ForkingPickler.dumps((inputs[start : start + chunk_size], kwargs)))
+                except Exception as exc:
+                    # Earlier chunks may already be running. Consume their results before leaving
+                    # a caller-owned pool available for another request with chunk IDs starting at 0.
+                    for _ in range(chunk_id):
+                        self._get_worker_result(pool)
+                    raise ValueError(
+                        f"Could not serialize multi-process input chunk {chunk_id}. "
+                        "Inputs and inference arguments must be picklable."
+                    ) from exc
+                while True:
+                    try:
+                        input_queue.put([chunk_id, payload], timeout=1.0)
+                        break
+                    except queue.Full:
+                        self._raise_if_worker_died(pool)
 
             outputs = [None] * num_chunks
             for _ in trange(num_chunks, desc="Chunks", disable=not show_progress_bar):
@@ -2066,8 +2084,10 @@ This pull request has been automatically generated to add {self.__class__.__name
         Workers are terminated externally via ``stop_multi_process_pool``.
         """
         while True:
-            chunk_id, inputs, kwargs = input_queue.get()
+            chunk_id, payload = input_queue.get()
             try:
+                # Decode inside the guarded block: an argument's reconstruction can fail too.
+                inputs, kwargs = pickle.loads(payload)
                 outputs = model._inference(inputs, device=target_device, **kwargs)
                 outputs = _move_tensors_to_cpu(outputs)
             except Exception as exc:
@@ -2085,13 +2105,17 @@ This pull request has been automatically generated to add {self.__class__.__name
                 return pool["output"].get(timeout=poll_interval)
             except queue.Empty:
                 pass
-            dead = [p for p in pool["processes"] if not p.is_alive()]
-            if dead:
-                details = ", ".join(f"pid {p.pid} (exit code {p.exitcode})" for p in dead)
-                raise RuntimeError(
-                    f"{len(dead)} multi-process pool worker(s) died unexpectedly: {details}. "
-                    "Stop the pool and start a new one before retrying."
-                )
+            BaseModel._raise_if_worker_died(pool)
+
+    @staticmethod
+    def _raise_if_worker_died(pool: dict[Literal["input", "output", "processes"], Any]) -> None:
+        dead = [p for p in pool["processes"] if not p.is_alive()]
+        if dead:
+            details = ", ".join(f"pid {p.pid} (exit code {p.exitcode})" for p in dead)
+            raise RuntimeError(
+                f"{len(dead)} multi-process pool worker(s) died unexpectedly: {details}. "
+                "Stop the pool and start a new one before retrying."
+            )
 
     @classmethod
     def _report_worker_failure(cls, chunk_id: int, exc: Exception, target_device: str) -> list[int | Exception]:

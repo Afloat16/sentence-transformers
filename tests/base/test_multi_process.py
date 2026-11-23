@@ -89,7 +89,10 @@ def test_multi_process_worker_reports_inference_failure(model_class, unpicklable
     results_queue = _RecordingQueue()
     with pytest.raises(_StopWorker):
         model_class._multi_process_worker(
-            "cpu", CrashingModel(unpicklable=unpicklable), _OneShotQueue([0, ["text"], {}]), results_queue
+            "cpu",
+            CrashingModel(unpicklable=unpicklable),
+            _OneShotQueue([0, pickle.dumps((["text"], {}))]),
+            results_queue,
         )
 
     # _multi_process blocks for exactly one result per submitted chunk
@@ -139,7 +142,7 @@ def test_multi_process_worker_returns_cpu_tensors(model_class, chunk):
     results_queue = _RecordingQueue()
     with pytest.raises(_StopWorker):
         model_class._multi_process_worker(
-            "cpu", _LeavesResultsOnDevice(), _OneShotQueue([0, chunk, {}]), results_queue
+            "cpu", _LeavesResultsOnDevice(), _OneShotQueue([0, pickle.dumps((chunk, {}))]), results_queue
         )
 
     assert len(results_queue.items) == 1

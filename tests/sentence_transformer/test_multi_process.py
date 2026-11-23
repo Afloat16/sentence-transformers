@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pickle
 import queue
 from unittest.mock import Mock
 
@@ -52,7 +53,7 @@ def test_multi_process_worker_reports_encode_failure(unpicklable: bool) -> None:
     ctx = torch.multiprocessing.get_context("spawn")
     input_queue = ctx.Queue()
     output_queue = ctx.Queue()
-    input_queue.put([0, ["text"], {}])
+    input_queue.put([0, pickle.dumps((["text"], {}))])
     process = ctx.Process(
         target=SentenceTransformer._multi_process_worker,
         args=("cpu", CrashingModel(unpicklable=unpicklable), input_queue, output_queue),
