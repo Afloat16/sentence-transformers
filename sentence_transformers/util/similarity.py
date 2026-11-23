@@ -357,6 +357,9 @@ def _pad_chunk(
     if chunk_mask is not None:
         # A caller-provided mask spans the global width, the chunk only its local width.
         chunk_mask = _fit_mask_width(chunk_mask, chunk.shape[1], name, truncate=True)
+        # Exclude padding before the dot products: masking scores afterward cannot undo
+        # non-finite products in the forward pass or their gradients. Keep caller tensors intact.
+        chunk = chunk.masked_fill(~chunk_mask.bool().unsqueeze(-1), 0)
     return chunk, chunk_mask
 
 
