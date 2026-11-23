@@ -35,11 +35,33 @@ class WeightedLayerPooling(Module):
         if ft_all_layers is None:
             return features
 
-        all_layer_embedding = torch.stack(ft_all_layers)
-        all_layer_embedding = all_layer_embedding[self.layer_start :, :, :, :]  # Start from 4th layers output
+        selected_layers = ft_all_layers[self.layer_start :]
+        if (
+            isinstance(ft_all_layers, (list, tuple))
+            and selected_layers
+            and selected_layers[0].ndim == 3
+            and all(
+                layer.shape == selected_layers[0].shape
+                and layer.dtype == selected_layers[0].dtype
+                and layer.device == selected_layers[0].device
+                and layer.layout == torch.strided
+                for layer in ft_all_layers
+            )
+        ):
+            all_layer_embedding = torch.stack(selected_layers)
+            # Preserve the zero-gradient connection that stacking all layers provided.
+            # Empty views do not read discarded NaN/Inf values or copy their storage.
+            discarded_zero = sum(
+                layer[..., :0].sum() for layer in ft_all_layers[: len(ft_all_layers) - len(selected_layers)]
+            )
+        else:
+            # Mixed layer dtypes and unusual shapes retain the original stack semantics.
+            all_layer_embedding = torch.stack(ft_all_layers)[self.layer_start :, :, :, :]
+            discarded_zero = 0
 
         weight_factor = self.layer_weights.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(all_layer_embedding.size())
-        weighted_average = (weight_factor * all_layer_embedding).sum(dim=0) / self.layer_weights.sum()
+        weighted_sum = (weight_factor * all_layer_embedding).sum(dim=0)
+        weighted_average = (weighted_sum + discarded_zero) / self.layer_weights.sum()
 
         features.update({"token_embeddings": weighted_average})
         return features
