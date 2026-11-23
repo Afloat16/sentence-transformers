@@ -304,6 +304,11 @@ def community_detection(
     embeddings = normalize_embeddings(embeddings)
 
     extracted_communities = []
+    # Keep at most one score block's worth of member indices. Candidates fitting
+    # this budget still use the single-pass path; dense graphs cannot retain
+    # every center's nearly identical membership list in host memory.
+    max_cached_members = batch_size * len(embeddings)
+    cached_members = 0
 
     # Maximum size for community
     sort_max_size = min(max(2 * min_community_size, 50), len(embeddings))
@@ -326,21 +331,37 @@ def community_detection(
             top_k_values, top_k_indices = cos_scores.topk(k=sort_max_size, largest=True)
 
         row_wise_count = (top_k_values >= threshold).sum(1)
-        top_k_indices = top_k_indices.cpu()
         centers = (large_enough_mask.nonzero(as_tuple=True)[0] + start_idx).tolist()
-        for center, count, indices in zip(centers, row_wise_count.tolist(), top_k_indices):
-            extracted_communities.append((center, indices[:count].numpy().astype(np.uint32)))
+        cpu_indices = None
+        for row, (center, count) in enumerate(zip(centers, row_wise_count.tolist())):
+            community = None
+            if cached_members + count <= max_cached_members:
+                if cpu_indices is None:
+                    cpu_indices = top_k_indices.cpu()
+                community = cpu_indices[row, :count].numpy().astype(np.uint32)
+                cached_members += count
+            extracted_communities.append((center, count, sort_max_size, community))
 
     # Largest cluster first
-    extracted_communities = sorted(extracted_communities, key=lambda x: len(x[1]), reverse=True)
+    extracted_communities = sorted(extracted_communities, key=lambda x: x[1], reverse=True)
 
     # Step 2) Remove overlapping communities using a dense boolean mask of already claimed indices
     unique_communities = []
     used = np.zeros(len(embeddings), dtype=bool)
+    cached_start = None
 
-    for center, community in extracted_communities:
+    for center, count, window, community in extracted_communities:
         if used[center]:
             continue
+        if community is None:
+            start_idx = center // batch_size * batch_size
+            if cached_start != start_idx:
+                # Match the first pass's matmul shape, including the final partial batch,
+                # so threshold-boundary membership uses the same floating-point scores.
+                cos_scores = embeddings[start_idx : start_idx + batch_size] @ embeddings.T
+                cached_start = start_idx
+            indices = cos_scores[center - start_idx].topk(k=window, largest=True).indices
+            community = indices[:count].cpu().numpy().astype(np.uint32)
         non_overlapped_community = community[~used[community]]
         if len(non_overlapped_community) >= min_community_size:
             unique_community = [center] + non_overlapped_community[non_overlapped_community != center].tolist()
