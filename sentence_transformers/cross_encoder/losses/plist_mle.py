@@ -269,9 +269,6 @@ class PListMLELoss(nn.Module):
         log_probs[~sorted_mask] = 0.0
         per_query_losses = -torch.sum(log_probs, dim=1)
 
-        if not torch.any(per_query_losses):
-            return torch.tensor(0.0, device=self.model.device, requires_grad=True)
-
         # Average loss over all lists
         return torch.mean(per_query_losses)
 
