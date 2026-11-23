@@ -16,6 +16,7 @@ from sentence_transformers.util import (
     similarity_fct_name,
     stack_padded_token_embeddings,
 )
+from sentence_transformers.util.tensor import _convert_to_float_tensor
 
 
 class MultiVectorDistillKLDivLoss(nn.Module):
@@ -182,8 +183,11 @@ class MultiVectorDistillKLDivLoss(nn.Module):
             documents_mask=documents_mask,
         )
 
+        # Promote before temperature division, including custom similarity outputs and teacher labels.
+        scores = _convert_to_float_tensor(scores)
+        teacher_scores = _convert_to_float_tensor(labels.detach())
         student_log_probs = F.log_softmax(scores / self.student_temperature, dim=-1)
-        teacher_log_probs = F.log_softmax(labels.detach() / self.teacher_temperature, dim=-1)
+        teacher_log_probs = F.log_softmax(teacher_scores / self.teacher_temperature, dim=-1)
         if not self._checked_teacher_scale:
             self._checked_teacher_scale = True
             check_teacher_targets(teacher_log_probs.exp(), labels, self.teacher_temperature, type(self).__name__)
