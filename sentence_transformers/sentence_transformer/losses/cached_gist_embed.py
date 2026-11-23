@@ -21,6 +21,8 @@ from sentence_transformers.base.losses.gradcache import (
 from sentence_transformers.sentence_transformer.model import SentenceTransformer
 from sentence_transformers.util import all_gather_with_grad, batch_to_device, get_rank
 
+from .gist_embed import _MatrixCosineSimilarity
+
 
 class CachedGISTEmbedLoss(nn.Module):
     # Back-propagates from a hook on the returned loss (see `gradcache.uses_gradient_cache`).
@@ -145,7 +147,7 @@ class CachedGISTEmbedLoss(nn.Module):
         self.model = model
         self.guide = guide
         self.temperature = temperature
-        self.similarity_fct = nn.CosineSimilarity(dim=-1)
+        self.similarity_fct = _MatrixCosineSimilarity(dim=-1)
         if not hasattr(model, "tokenizer") or not hasattr(guide, "tokenizer"):
             raise ValueError("Both the training model and the guiding model must have a tokenizer attribute.")
         if not isinstance(model.tokenizer, PreTrainedTokenizerBase) or not isinstance(

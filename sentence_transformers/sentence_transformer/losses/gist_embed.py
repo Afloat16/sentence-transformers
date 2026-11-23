@@ -13,6 +13,35 @@ from sentence_transformers.sentence_transformer.modules import StaticEmbedding
 from sentence_transformers.util import all_gather_with_grad, batch_to_device, get_rank
 
 
+class _MatrixCosineSimilarity(nn.CosineSimilarity):
+    """Normalize each embedding before expanding the pairwise document axes."""
+
+    def forward(self, first: Tensor, second: Tensor) -> Tensor:
+        # Keep guide filtering and reduced-precision behavior on the native path.
+        if not (
+            first.ndim == second.ndim == 3
+            and self.dim in (-1, 2)
+            and first.shape[1] == second.shape[0] == 1
+            and first.shape[-1] == second.shape[-1]
+            and first.dtype == second.dtype
+            and first.dtype in (torch.float32, torch.float64)
+            and torch.is_grad_enabled()
+            and (first.requires_grad or second.requires_grad)
+            and self.eps >= 0
+        ):
+            return super().forward(first, second)
+
+        first_norm = torch.linalg.vector_norm(first, dim=-1, keepdim=True).clone()
+        second_norm = torch.linalg.vector_norm(second, dim=-1, keepdim=True).clone()
+        eps = torch.as_tensor(self.eps, dtype=first.dtype, device=first.device)
+        # Match native cosine's clamped-norm gradient, including norms below eps.
+        # F.normalize differentiates through its clamp and gives different gradients.
+        with torch.no_grad():
+            first_norm.clamp_min_(eps)
+            second_norm.clamp_min_(eps)
+        return ((first / first_norm) * (second / second_norm)).sum(dim=-1)
+
+
 class GISTEmbedLoss(nn.Module):
     def __init__(
         self,
@@ -104,7 +133,7 @@ class GISTEmbedLoss(nn.Module):
         self.model = model
         self.guide = guide
         self.temperature = temperature
-        self.similarity_fct = nn.CosineSimilarity(dim=-1)
+        self.similarity_fct = _MatrixCosineSimilarity(dim=-1)
         if not hasattr(model, "tokenizer") or not hasattr(guide, "tokenizer"):
             raise ValueError("Both the training model and the guiding model must have a tokenizer attribute.")
         if not isinstance(model.tokenizer, PreTrainedTokenizerBase) or not isinstance(
