@@ -5,6 +5,7 @@ from collections.abc import Generator
 import torch
 from torch import Tensor, nn
 
+from sentence_transformers.cross_encoder.losses._negative_pairs import _InBatchNegatives
 from sentence_transformers.cross_encoder.model import CrossEncoder
 from sentence_transformers.util import batch_to_device, fullname
 
@@ -128,31 +129,7 @@ class MultipleNegativesRankingLoss(nn.Module):
     def get_in_batch_negatives(
         self, anchors: list[str], candidates: list[list[str]]
     ) -> Generator[list[str], None, None]:
-        batch_size = len(anchors)
-        num_columns = len(candidates)
-
-        # Given N anchors, we want to select num_negatives negatives for each anchor
-        candidates_flattened = [candidate for sublist in candidates for candidate in sublist]
-
-        # Create a mask for each anchor to each candidate index, where the matching positive
-        # and hard negatives are masked out.
-        mask = ~torch.eye(batch_size, dtype=torch.bool).repeat(1, num_columns)
-
-        # Valid negatives for each anchor are all candidates except the ones that are the positive or hard negatives
-        # And num_columns = 1(positive) + num_hard_negatives
-        valid_negative_num = len(candidates_flattened) - num_columns
-
-        if self.num_negatives is not None and self.num_negatives < valid_negative_num:
-            # From the remaining options, we randomly select num_negatives indices.
-            negative_indices = torch.multinomial(mask.float(), self.num_negatives)
-        else:
-            # If num_negatives is None or larger than the number of valid negatives, we select all negatives
-            # by using the mask as a slicer to get the indices of the negative candidates
-            all_indices = torch.arange(batch_size * num_columns).repeat(batch_size, 1)
-            negative_indices = all_indices[mask].reshape(batch_size, -1)
-
-        for negative_indices_row in negative_indices.T:
-            yield [candidates_flattened[negative_idx] for negative_idx in negative_indices_row]
+        yield from _InBatchNegatives(len(anchors), candidates, self.num_negatives).columns()
 
     def calculate_loss(self, logits: Tensor, batch_size: int) -> Tensor:
         # (bsz, 1 + num_rand_negatives + num_hard_negatives)

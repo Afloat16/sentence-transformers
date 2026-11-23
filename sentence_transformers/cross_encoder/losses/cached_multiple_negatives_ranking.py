@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import nullcontext
 from functools import partial
 from typing import Any
@@ -10,9 +10,12 @@ import tqdm
 from torch import Tensor, nn
 
 from sentence_transformers.base.losses.gradcache import RandContext, _backward_hook
+from sentence_transformers.cross_encoder.losses._negative_pairs import _CrossEncoderPairs
 from sentence_transformers.cross_encoder.losses.multiple_negatives_ranking import MultipleNegativesRankingLoss
 from sentence_transformers.cross_encoder.model import CrossEncoder
 from sentence_transformers.util import batch_to_device
+
+_BUILTIN_NEGATIVE_SAMPLER = MultipleNegativesRankingLoss.get_in_batch_negatives
 
 
 class CachedMultipleNegativesRankingLoss(MultipleNegativesRankingLoss):
@@ -167,14 +170,15 @@ class CachedMultipleNegativesRankingLoss(MultipleNegativesRankingLoss):
 
     def predict_minibatch_iter(
         self,
-        pairs: list[list[str]],
+        pairs: Sequence[tuple[str, str]],
         with_grad: bool,
         copy_random_state: bool,
         random_states: list[RandContext] | None = None,
         prompt: str | None = None,
         task: str | None = None,
     ) -> Iterator[tuple[Tensor, RandContext | None]]:
-        """Do forward pass on all the minibatches of the input features and yield corresponding embeddings."""
+        """Predict pair slices and yield their logits. The built-in sampler can supply a read-only
+        sequence, so only the current mini-batch's pair list needs to be materialized."""
         for i, b in enumerate(
             tqdm.trange(
                 0,
@@ -230,21 +234,25 @@ class CachedMultipleNegativesRankingLoss(MultipleNegativesRankingLoss):
         self, inputs: list[list[str]], labels: Tensor | None = None, prompt: str | None = None, task: str | None = None
     ) -> Tensor:
         # Step (1): A quick prediction step without gradients/computation graphs to get all the logits
-        anchors = inputs[0][::]
-        candidates = inputs[1][::]
-        batch_size = len(anchors)
-
-        # In-batch negatives:
-        for negatives in self.get_in_batch_negatives(inputs[0], inputs[1:]):
-            anchors.extend(inputs[0])
-            candidates.extend(negatives)
-
-        # Hard negatives:
-        for negatives in inputs[2:]:
-            anchors.extend(inputs[0])
-            candidates.extend(negatives)
-
-        pairs = list(zip(anchors, candidates))
+        batch_size = len(inputs[0])
+        if (
+            getattr(self.get_in_batch_negatives, "__func__", None) is _BUILTIN_NEGATIVE_SAMPLER
+            and getattr(self.predict_minibatch_iter, "__func__", None) is _BUILTIN_PAIR_ITERATOR
+            and getattr(self.embed_minibatch_iter, "__func__", None) is _BUILTIN_REPLAY_ITERATOR
+        ):
+            pairs = _CrossEncoderPairs(inputs, self.num_negatives)
+        else:
+            # Preserve custom samplers and the existing list contract for overridden
+            # prediction/replay iterators, including instance overrides.
+            anchors = inputs[0][::]
+            candidates = inputs[1][::]
+            for negatives in self.get_in_batch_negatives(inputs[0], inputs[1:]):
+                anchors.extend(inputs[0])
+                candidates.extend(negatives)
+            for negatives in inputs[2:]:
+                anchors.extend(inputs[0])
+                candidates.extend(negatives)
+            pairs = list(zip(anchors, candidates))
         grad_enabled = torch.is_grad_enabled()
 
         logits = []
@@ -283,3 +291,7 @@ class CachedMultipleNegativesRankingLoss(MultipleNegativesRankingLoss):
 
     def get_config_dict(self):
         return {**super().get_config_dict(), "mini_batch_size": self.mini_batch_size}
+
+
+_BUILTIN_PAIR_ITERATOR = CachedMultipleNegativesRankingLoss.predict_minibatch_iter
+_BUILTIN_REPLAY_ITERATOR = CachedMultipleNegativesRankingLoss.embed_minibatch_iter
