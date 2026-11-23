@@ -108,13 +108,13 @@ class SpladePooling(Module):
                 masked_current_chunk_logits = current_chunk_logits * current_chunk_mask
 
                 current_chunk_transformed = masked_current_chunk_logits.relu_()
-                if not self.training:
+                if not self.training and not torch.is_grad_enabled():
                     current_chunk_transformed = current_chunk_transformed.log1p_()
                 else:
                     current_chunk_transformed = current_chunk_transformed.log1p()
                 # With "log1p_relu", we apply a second log1p
                 if self.activation_function == "log1p_relu":
-                    if not self.training:
+                    if not self.training and not torch.is_grad_enabled():
                         current_chunk_transformed = current_chunk_transformed.log1p_()
                     else:
                         current_chunk_transformed = current_chunk_transformed.log1p()
@@ -150,9 +150,9 @@ class SpladePooling(Module):
         pooled = []
         for start, end in zip(cu_seq_lens[:-1], cu_seq_lens[1:]):
             transformed = flat_logits[start:end].relu()
-            transformed = transformed.log1p() if self.training else transformed.log1p_()
+            transformed = transformed.log1p() if self.training or torch.is_grad_enabled() else transformed.log1p_()
             if self.activation_function == "log1p_relu":
-                transformed = transformed.log1p() if self.training else transformed.log1p_()
+                transformed = transformed.log1p() if self.training or torch.is_grad_enabled() else transformed.log1p_()
             pooled.append(reduce(transformed, dim=0))
         pooled_scores = torch.stack(pooled)
 
