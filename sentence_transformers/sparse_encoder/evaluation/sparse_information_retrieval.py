@@ -56,6 +56,9 @@ class SparseInformationRetrievalEvaluator(InformationRetrievalEvaluator):
         corpus_prompt_name (str, optional): The name of the prompt to be used when encoding the corpus. Defaults to None.
         write_predictions (bool): Whether to write the predictions to a JSONL file. Defaults to False.
             This can be useful for downstream evaluation as it can be used as input to the :class:`~sentence_transformers.sparse_encoder.evaluation.ReciprocalRankFusionEvaluator` that accept precomputed predictions.
+        query_chunk_size (int): Maximum number of queries scored together against each corpus chunk.
+            Bounds the dense score matrix to ``query_chunk_size * corpus_chunk_size`` entries while
+            keeping the query embeddings sparse. Defaults to 100.
 
     Example:
         ::
@@ -158,6 +161,7 @@ class SparseInformationRetrievalEvaluator(InformationRetrievalEvaluator):
         corpus_prompt: str | None = None,
         corpus_prompt_name: str | None = None,
         write_predictions: bool = False,
+        query_chunk_size: int = 100,
     ) -> None:
         self.max_active_dims = max_active_dims
         self.sparsity_stats = {"query": defaultdict(list), "corpus": defaultdict(list)}
@@ -184,6 +188,7 @@ class SparseInformationRetrievalEvaluator(InformationRetrievalEvaluator):
             corpus_prompt=corpus_prompt,
             corpus_prompt_name=corpus_prompt_name,
             write_predictions=write_predictions,
+            query_chunk_size=query_chunk_size,
         )
 
     def _append_csv_headers(self, score_function_names):

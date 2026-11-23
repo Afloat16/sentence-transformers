@@ -54,6 +54,9 @@ class InformationRetrievalEvaluator(BaseEvaluator):
         corpus_prompt_name (str, optional): The name of the prompt to be used when encoding the corpus. Defaults to None.
         write_predictions (bool): Whether to write the predictions to a JSONL file. Defaults to False.
             This can be useful for downstream evaluation as it can be used as input to the :class:`~sentence_transformers.sparse_encoder.evaluation.ReciprocalRankFusionEvaluator` that accept precomputed predictions.
+        query_chunk_size (int): Maximum number of queries scored together against each corpus chunk.
+            Bounds the score matrix to ``query_chunk_size * corpus_chunk_size`` entries. Query embeddings
+            are encoded once and kept in memory. Defaults to 100.
 
     Example:
         ::
@@ -154,8 +157,12 @@ class InformationRetrievalEvaluator(BaseEvaluator):
         corpus_prompt: str | None = None,
         corpus_prompt_name: str | None = None,
         write_predictions: bool = False,
+        query_chunk_size: int = 100,
     ) -> None:
         super().__init__()
+        if query_chunk_size <= 0:
+            raise ValueError("query_chunk_size must be positive")
+        self.query_chunk_size = query_chunk_size
         self.queries_ids = []
         for qid in queries:
             if qid in relevant_docs and len(relevant_docs[qid]) > 0:
@@ -335,53 +342,64 @@ class InformationRetrievalEvaluator(BaseEvaluator):
             else:
                 sub_corpus_embeddings = corpus_embeddings[corpus_start_idx:corpus_end_idx]
 
-            # Compute cosine similarities
-            for name, score_function in self.score_functions.items():
-                pair_scores = score_function(query_embeddings, sub_corpus_embeddings)
+            # Bound score and top-k temporaries in both the query and corpus dimensions.
+            for query_start_idx in range(0, len(query_embeddings), self.query_chunk_size):
+                query_end_idx = min(query_start_idx + self.query_chunk_size, len(query_embeddings))
+                if isinstance(query_embeddings, Tensor) and query_embeddings.is_sparse:
+                    indices = torch.arange(query_start_idx, query_end_idx, device=query_embeddings.device)
+                    sub_query_embeddings = query_embeddings.index_select(0, indices)
+                else:
+                    sub_query_embeddings = query_embeddings[query_start_idx:query_end_idx]
 
-                # Get top-k values
-                top_k = min(max_k, len(pair_scores[0]))
-                pair_scores_top_k_values, pair_scores_top_k_idx = torch.topk(
-                    pair_scores, top_k, dim=1, largest=True, sorted=False
-                )
-                # torch.topk breaks score ties arbitrarily. Rows with ties at the top_k-th score are
-                # reselected under the (-score, corpus_id) total order used for the final ranking, so
-                # the reported metrics do not depend on corpus_chunk_size.
-                thresholds = pair_scores_top_k_values.min(dim=1, keepdim=True).values
-                has_boundary_ties = ((pair_scores >= thresholds).sum(dim=1) > top_k).cpu().tolist()
-                if any(has_boundary_ties):
-                    # Order the candidates by (-score, corpus_id) with an integer key, so that only
-                    # top_k of them per query reach Python even when the whole chunk is tied: every
-                    # score above the cutoff sorts first, then the ties with the lowest corpus_ids.
-                    n_corpus = len(self.corpus_ids)
-                    chunk_ranks = self.get_corpus_id_ranks()[corpus_start_idx:corpus_end_idx].to(pair_scores.device)
-                    tie_keys = torch.where(pair_scores > thresholds, chunk_ranks, 2 * n_corpus)
-                    tie_keys = torch.where(pair_scores == thresholds, chunk_ranks + n_corpus, tie_keys)
-                    tie_idx = tie_keys.topk(top_k, dim=1, largest=False).indices
-                    tie_scores = pair_scores.gather(1, tie_idx).cpu().tolist()
-                    tie_idx = tie_idx.cpu().tolist()
-                pair_scores_top_k_values = pair_scores_top_k_values.cpu().tolist()
-                pair_scores_top_k_idx = pair_scores_top_k_idx.cpu().tolist()
+                for name, score_function in self.score_functions.items():
+                    pair_scores = score_function(sub_query_embeddings, sub_corpus_embeddings)
 
-                for query_itr in range(len(query_embeddings)):
-                    if has_boundary_ties[query_itr]:
-                        sub_corpus_ids = tie_idx[query_itr]
-                        scores = tie_scores[query_itr]
-                    else:
-                        sub_corpus_ids = pair_scores_top_k_idx[query_itr]
-                        scores = pair_scores_top_k_values[query_itr]
+                    # Get top-k values
+                    top_k = min(max_k, len(pair_scores[0]))
+                    pair_scores_top_k_values, pair_scores_top_k_idx = torch.topk(
+                        pair_scores, top_k, dim=1, largest=True, sorted=False
+                    )
+                    # torch.topk breaks score ties arbitrarily. Rows with ties at the top_k-th score are
+                    # reselected under the (-score, corpus_id) total order used for the final ranking, so
+                    # the reported metrics do not depend on corpus_chunk_size.
+                    thresholds = pair_scores_top_k_values.min(dim=1, keepdim=True).values
+                    has_boundary_ties = ((pair_scores >= thresholds).sum(dim=1) > top_k).cpu().tolist()
+                    if any(has_boundary_ties):
+                        # Order the candidates by (-score, corpus_id) with an integer key, so that only
+                        # top_k of them per query reach Python even when the whole chunk is tied: every
+                        # score above the cutoff sorts first, then the ties with the lowest corpus_ids.
+                        n_corpus = len(self.corpus_ids)
+                        chunk_ranks = self.get_corpus_id_ranks()[corpus_start_idx:corpus_end_idx].to(
+                            pair_scores.device
+                        )
+                        tie_keys = torch.where(pair_scores > thresholds, chunk_ranks, 2 * n_corpus)
+                        tie_keys = torch.where(pair_scores == thresholds, chunk_ranks + n_corpus, tie_keys)
+                        tie_idx = tie_keys.topk(top_k, dim=1, largest=False).indices
+                        tie_scores = pair_scores.gather(1, tie_idx).cpu().tolist()
+                        tie_idx = tie_idx.cpu().tolist()
+                    pair_scores_top_k_values = pair_scores_top_k_values.cpu().tolist()
+                    pair_scores_top_k_idx = pair_scores_top_k_idx.cpu().tolist()
 
-                    query_hits = queries_result_list[name][query_itr]
-                    for sub_corpus_id, score in zip(sub_corpus_ids, scores):
-                        corpus_id = self.corpus_ids[corpus_start_idx + sub_corpus_id]
-                        # NOTE: TREC/BEIR/MTEB skips cases where the corpus_id is the same as the query_id, e.g.:
-                        # if corpus_id == self.queries_ids[query_itr]:
-                        #     continue
-                        # This is not done here, as this might be unexpected behaviour if the user just uses
-                        # sets of integers from 0 as query_ids and corpus_ids.
-                        query_hits.append((score, corpus_id))
-                    query_hits.sort(key=lambda x: (-x[0], x[1]))
-                    del query_hits[max_k:]
+                    for query_offset in range(len(sub_query_embeddings)):
+                        query_itr = query_start_idx + query_offset
+                        if has_boundary_ties[query_offset]:
+                            sub_corpus_ids = tie_idx[query_offset]
+                            scores = tie_scores[query_offset]
+                        else:
+                            sub_corpus_ids = pair_scores_top_k_idx[query_offset]
+                            scores = pair_scores_top_k_values[query_offset]
+
+                        query_hits = queries_result_list[name][query_itr]
+                        for sub_corpus_id, score in zip(sub_corpus_ids, scores):
+                            corpus_id = self.corpus_ids[corpus_start_idx + sub_corpus_id]
+                            # NOTE: TREC/BEIR/MTEB skips cases where the corpus_id is the same as the query_id, e.g.:
+                            # if corpus_id == self.queries_ids[query_itr]:
+                            #     continue
+                            # This is not done here, as this might be unexpected behaviour if the user just uses
+                            # sets of integers from 0 as query_ids and corpus_ids.
+                            query_hits.append((score, corpus_id))
+                        query_hits.sort(key=lambda x: (-x[0], x[1]))
+                        del query_hits[max_k:]
 
         for name in queries_result_list:
             for query_itr in range(len(queries_result_list[name])):
@@ -577,6 +595,7 @@ class InformationRetrievalEvaluator(BaseEvaluator):
     def get_config_dict(self):
         config_dict = {}
         config_dict_candidate_keys = [
+            "query_chunk_size",
             "truncate_dim",
             "query_prompt",
             "query_prompt_name",
