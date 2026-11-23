@@ -195,11 +195,11 @@ class BatchHardTripletLoss(nn.Module):
 
         # For each anchor, get the hardest negative
         # First, we need to get a mask for every valid negative (they should have different labels)
-        mask_anchor_negative = BatchHardTripletLoss.get_anchor_negative_triplet_mask(labels).float()
+        mask_anchor_negative = BatchHardTripletLoss.get_anchor_negative_triplet_mask(labels)
 
-        # We add the maximum value in each row to the invalid negatives (label(a) == label(n))
-        max_anchor_negative_dist, _ = pairwise_dist.max(1, keepdim=True)
-        anchor_negative_dist = pairwise_dist + max_anchor_negative_dist * (1.0 - mask_anchor_negative)
+        # Exclude invalid negatives completely: adding a row maximum can tie with a valid
+        # negative and route the minimum's gradient through a same-label example instead.
+        anchor_negative_dist = pairwise_dist.masked_fill(~mask_anchor_negative, float("inf"))
 
         # shape (batch_size,)
         hardest_negative_dist, _ = anchor_negative_dist.min(1, keepdim=True)
