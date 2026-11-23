@@ -316,9 +316,21 @@ class LambdaLoss(nn.Module):
         # Apply weighting scheme
         weights = self.weighting_scheme(gain, discount, true_sorted_by_preds)
 
+        # Select contributing pairs before the differentiable scoring operations, so
+        # backward does not retain scoring tensors for discarded top-k or label pairs.
+        pair_mask = padded_pairs_mask & ndcg_at_k_mask
+        # NDCGLoss1 uses compact row weights and keeps both pair directions. For broad
+        # cutoffs, expanding these weights would cost more memory than filtering saves.
+        select_pairs = not isinstance(self.weighting_scheme, NDCGLoss1Scheme) or 0 < k <= max_docs // 4
+        scores_diffs = logits_matrix_sorted[:, :, None] - logits_matrix_sorted[:, None, :]
+        if select_pairs:
+            scores_diffs = scores_diffs[pair_mask]
+            if weights.ndim != 0:
+                weights = weights.broadcast_to(pair_mask.shape)[pair_mask]
+
         # Calculate weighted log-probabilities directly to avoid underflow and
         # preserve gradients for strongly misordered pairs.
-        scores_diffs = (logits_matrix_sorted[:, :, None] - logits_matrix_sorted[:, None, :]).clamp(min=-1e8, max=1e8)
+        scores_diffs = scores_diffs.clamp(min=-1e8, max=1e8)
         scores_diffs.masked_fill_(torch.isnan(scores_diffs), 0.0)
         losses = weights * nn.functional.logsigmoid(self.sigma * scores_diffs)
 
@@ -326,9 +338,9 @@ class LambdaLoss(nn.Module):
         if self.reduction_log == "binary":
             losses = losses / math.log(2)
 
-        # Apply masks and reduction
-        masked_losses = losses[padded_pairs_mask & ndcg_at_k_mask]
-        loss = -masked_losses.sum() / max(masked_losses.numel(), 1)
+        if not select_pairs:
+            losses = losses[pair_mask]
+        loss = -losses.sum() / max(losses.numel(), 1)
         return loss
 
     def get_config_dict(self) -> dict[str, float | int | str | None]:
