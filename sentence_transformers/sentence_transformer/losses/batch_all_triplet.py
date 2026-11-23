@@ -3,11 +3,82 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
+import torch
 from torch import Tensor, nn
 
 from sentence_transformers.sentence_transformer.model import SentenceTransformer
 
 from .batch_hard_triplet import BatchHardTripletLoss, BatchHardTripletLossDistanceFunction
+
+
+class _BatchAllTripletReduction(torch.autograd.Function):
+    @staticmethod
+    def forward(distances, labels, anchor_indices, positive_indices, margin):
+        # Each active hinge contributes +1 to its anchor-positive distance and -1 to
+        # its anchor-negative distance. Accumulate those coefficients rather than
+        # retaining an autograd graph for every triplet in a large label group.
+        reduction_dtype = torch.promote_types(torch.result_type(distances, margin), torch.float32)
+        coefficients = torch.zeros_like(distances, dtype=reduction_dtype)
+        numerator = distances.new_zeros((), dtype=reduction_dtype)
+        num_positive = distances.new_zeros((), dtype=torch.long)
+        batch_size = len(distances)
+        for start in range(0, len(anchor_indices), max(1, batch_size)):
+            anchors = anchor_indices[start : start + batch_size]
+            positives = positive_indices[start : start + batch_size]
+            # Preserve the subtraction order: (positive + margin) - negative can
+            # cross the zero-hinge boundary after floating-point rounding.
+            losses = distances[anchors, positives, None] - distances[anchors] + margin
+            valid = labels[anchors, None] != labels[None, :]
+            losses = valid.float() * losses
+            negative = losses < 0
+            # The original strict '< 0' mask retains the derivative at a zero hinge.
+            active = valid & ~negative
+            losses[negative] = 0
+            numerator += losses.sum()
+            num_positive += (losses > 1e-16).sum()
+
+            coefficients[anchors, positives] = active.sum(dim=1).to(reduction_dtype)
+            coefficients.index_add_(0, anchors, -active.to(reduction_dtype))
+
+        denominator = num_positive.to(reduction_dtype) + 1e-16
+        return numerator / denominator, coefficients, denominator
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        _, coefficients, denominator = output
+        ctx.distance_dtype = inputs[0].dtype
+        ctx.margin_shape = inputs[4].shape if isinstance(inputs[4], Tensor) else None
+        ctx.margin_dtype = inputs[4].dtype if isinstance(inputs[4], Tensor) else None
+        ctx.save_for_backward(coefficients, denominator)
+        ctx.save_for_forward(coefficients, denominator)
+        ctx.mark_non_differentiable(coefficients, denominator)
+
+    @staticmethod
+    def backward(ctx, grad_output, _grad_coefficients, _grad_denominator):
+        coefficients, denominator = ctx.saved_tensors
+        # Match the cast from the float32 mask multiplication back to a custom
+        # low-precision distance metric before accumulating its contributions.
+        scale = (grad_output / denominator).to(ctx.distance_dtype)
+        gradient = coefficients * scale.to(coefficients.dtype)
+        # Inactive entries remain zero when the reciprocal overflows a custom fp16
+        # distance dtype (no positive triplets); multiplying zero by infinity does not.
+        gradient.masked_fill_(coefficients == 0, 0)
+        margin_gradient = None
+        if ctx.needs_input_grad[4]:
+            margin_gradient = (
+                (-coefficients.clamp(max=0).sum(dim=0) * (grad_output / denominator))
+                .sum_to_size(ctx.margin_shape)
+                .to(ctx.margin_dtype)
+            )
+        return gradient.to(ctx.distance_dtype), None, None, None, margin_gradient
+
+    @staticmethod
+    def jvp(ctx, distance_tangent, _labels_tangent, _anchors_tangent, _positives_tangent, margin_tangent):
+        coefficients, denominator = ctx.saved_tensors
+        tangent = (coefficients * distance_tangent).sum()
+        if margin_tangent is not None:
+            tangent -= (coefficients.clamp(max=0).sum(dim=0) * margin_tangent).sum()
+        return tangent / denominator, None, None
 
 
 class BatchAllTripletLoss(nn.Module):
@@ -22,6 +93,10 @@ class BatchAllTripletLoss(nn.Module):
         triplets, i.e., anchor and positive must have the same label, anchor and negative a different label. The labels
         must be integers, with same label indicating inputs from the same class. Your train dataset
         must contain at least 2 examples per label class.
+
+        Triplet reduction uses quadratic intermediate memory, including when many examples share
+        a label. It still computes every valid triplet; the number of comparisons can be cubic in
+        the batch size.
 
         Args:
             model: SentenceTransformer model
@@ -116,29 +191,13 @@ class BatchAllTripletLoss(nn.Module):
 
         pairwise_dist = self.distance_metric(embeddings)
 
-        # Only valid anchor-positive pairs need to be compared with the negatives. With K
-        # samples per label this uses B * (K - 1) rows instead of allocating a B x B x B cube.
+        # Only valid anchor-positive pairs need to be compared with the negatives.
         anchor_indices, positive_indices = BatchHardTripletLoss.get_anchor_positive_triplet_mask(labels).nonzero(
             as_tuple=True
         )
-        anchor_positive_dist = pairwise_dist[anchor_indices, positive_indices].unsqueeze(1)
-        triplet_loss = anchor_positive_dist - pairwise_dist[anchor_indices] + self.triplet_margin
-
-        # A negative must have a different label from the anchor (and therefore the positive).
-        mask = labels[anchor_indices].unsqueeze(1) != labels.unsqueeze(0)
-        triplet_loss = mask.float() * triplet_loss
-
-        # Remove negative losses (i.e. the easy triplets)
-        triplet_loss[triplet_loss < 0] = 0
-
-        # Count number of positive triplets (where triplet_loss > 0)
-        valid_triplets = triplet_loss[triplet_loss > 1e-16]
-        num_positive_triplets = valid_triplets.size(0)
-
-        # Get final mean triplet loss over the positive valid triplets
-        triplet_loss = triplet_loss.sum() / (num_positive_triplets + 1e-16)
-
-        return triplet_loss
+        return _BatchAllTripletReduction.apply(
+            pairwise_dist, labels, anchor_indices, positive_indices, self.triplet_margin
+        )[0]
 
     def get_config_dict(self) -> dict[str, Any]:
         return {
