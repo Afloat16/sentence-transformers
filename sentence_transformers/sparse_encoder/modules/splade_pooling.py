@@ -99,6 +99,14 @@ class SpladePooling(Module):
 
         # Process in chunks if chunk_size is set, otherwise process the entire sequence at once
         chunk_size = seq_len if (self.chunk_size is None or self.chunk_size <= 0) else self.chunk_size
+        # Both activations are monotone, so inference can transform only the maxima.
+        # Keep the original order with reverse- or forward-mode gradients: rounding
+        # can create activation ties, and no_grad does not disable forward-mode AD.
+        reduce_first = (
+            self.pooling_strategy == "max"
+            and not torch.is_grad_enabled()
+            and torch.autograd.forward_ad.unpack_dual(mlm_logits).tangent is None
+        )
 
         for i in range(0, seq_len, chunk_size):
             try:
@@ -106,6 +114,8 @@ class SpladePooling(Module):
                 current_chunk_mask = attention_mask_expanded[:, i : i + chunk_size, :]
 
                 masked_current_chunk_logits = current_chunk_logits * current_chunk_mask
+                if reduce_first:
+                    masked_current_chunk_logits = masked_current_chunk_logits.amax(dim=1)
 
                 current_chunk_transformed = masked_current_chunk_logits.relu_()
                 if not self.training:
@@ -120,7 +130,9 @@ class SpladePooling(Module):
                         current_chunk_transformed = current_chunk_transformed.log1p()
 
                 if self.pooling_strategy == "max":
-                    chunk_pooled = torch.max(current_chunk_transformed, dim=1)[0]
+                    chunk_pooled = (
+                        current_chunk_transformed if reduce_first else torch.max(current_chunk_transformed, dim=1)[0]
+                    )
                     pooled_scores = torch.maximum(pooled_scores, chunk_pooled)
                 else:
                     chunk_pooled = torch.sum(current_chunk_transformed, dim=1)
@@ -147,13 +159,21 @@ class SpladePooling(Module):
         # Transform per segment inside the loop: a transformed copy of the full flat logits would
         # double this module's peak memory, which is what caps the reachable batch size.
         reduce = torch.amax if self.pooling_strategy == "max" else torch.sum
+        reduce_first = (
+            self.pooling_strategy == "max"
+            and not torch.is_grad_enabled()
+            and torch.autograd.forward_ad.unpack_dual(flat_logits).tangent is None
+        )
         pooled = []
         for start, end in zip(cu_seq_lens[:-1], cu_seq_lens[1:]):
-            transformed = flat_logits[start:end].relu()
+            segment = flat_logits[start:end]
+            if reduce_first:
+                segment = reduce(segment, dim=0)
+            transformed = segment.relu()
             transformed = transformed.log1p() if self.training else transformed.log1p_()
             if self.activation_function == "log1p_relu":
                 transformed = transformed.log1p() if self.training else transformed.log1p_()
-            pooled.append(reduce(transformed, dim=0))
+            pooled.append(transformed if reduce_first else reduce(transformed, dim=0))
         pooled_scores = torch.stack(pooled)
 
         if self.embedding_dimension is None:
