@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
 
 from sentence_transformers.base.evaluation.evaluator import BaseEvaluator
@@ -19,7 +19,9 @@ class SequentialEvaluator(BaseEvaluator):
     Args:
         evaluators (Iterable[BaseEvaluator]): A collection of BaseEvaluator objects.
         main_score_function (function, optional): A function that takes a list of scores and returns the main score.
-            Defaults to selecting the last score in the list.
+            Defaults to selecting the last score in the list and inheriting the last evaluator's
+            ``greater_is_better`` setting. Custom score functions default to higher scores being better;
+            set ``greater_is_better`` on this evaluator if the custom score should be minimized.
 
     Example:
         ::
@@ -30,10 +32,17 @@ class SequentialEvaluator(BaseEvaluator):
             seq_evaluator = SequentialEvaluator([evaluator1, evaluator2, evaluator3])
     """
 
-    def __init__(self, evaluators: Iterable[BaseEvaluator], main_score_function=lambda scores: scores[-1]):
+    def __init__(
+        self,
+        evaluators: Iterable[BaseEvaluator],
+        main_score_function: Callable[[list[float]], float] | None = None,
+    ):
         super().__init__()
         self.evaluators = list(evaluators)
-        self.main_score_function = main_score_function
+        self._use_last_score = main_score_function is None
+        self.main_score_function = main_score_function if main_score_function is not None else lambda scores: scores[-1]
+        if self._use_last_score and self.evaluators:
+            self.greater_is_better = getattr(self.evaluators[-1], "greater_is_better", True)
 
     def __call__(
         self, model: BaseModel, output_path: str | None = None, epoch: int = -1, steps: int = -1
@@ -59,6 +68,8 @@ class SequentialEvaluator(BaseEvaluator):
             main_score = 0.0
         else:
             main_score = self.main_score_function(scores)
+            if self._use_last_score:
+                self.greater_is_better = getattr(self.evaluators[-1], "greater_is_better", True)
         results = {key: value for evaluation in evaluations for key, value in evaluation.items()}
         results["sequential_score"] = main_score
         return results
