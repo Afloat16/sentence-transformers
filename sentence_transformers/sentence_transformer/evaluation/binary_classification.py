@@ -328,7 +328,8 @@ class BinaryClassificationEvaluator(BaseEvaluator):
             acc = (positive_so_far + remaining_negatives) / len(labels)
             if acc > max_acc:
                 max_acc = acc
-                best_threshold = score if is_last else (score + rows[i + 1][0]) / 2
+                # Promote narrow scores and halve before adding to avoid overflow.
+                best_threshold = score if is_last else float(score) / 2 + float(rows[i + 1][0]) / 2
                 # A rounded midpoint must not include the next score group.
                 if not is_last and best_threshold == rows[i + 1][0]:
                     best_threshold = score
@@ -370,7 +371,7 @@ class BinaryClassificationEvaluator(BaseEvaluator):
                     best_f1 = f1
                     best_precision = precision
                     best_recall = recall
-                    threshold = score if is_last else (score + rows[i + 1][0]) / 2
+                    threshold = score if is_last else float(score) / 2 + float(rows[i + 1][0]) / 2
                     if not is_last and threshold == rows[i + 1][0]:
                         threshold = score
 
