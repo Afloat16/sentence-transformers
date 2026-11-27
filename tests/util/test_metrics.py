@@ -60,3 +60,37 @@ def test_binary_ndcg_matches_sklearn(labels, scores, k):
 )
 def test_binary_ndcg(labels, scores, k, num_positives, expected):
     assert _binary_ndcg(labels, scores, k=k, num_positives=num_positives) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("dtype", [np.int8, np.uint8, np.int64, np.bool_])
+@pytest.mark.parametrize("num_positives", [128, 256, 300])
+def test_binary_ndcg_counts_narrow_labels_without_overflow(dtype, num_positives):
+    labels = np.array([1] * num_positives + [0] * 100, dtype=dtype)
+    scores = np.arange(len(labels), dtype=float)
+    expected = ndcg_score([labels], [scores], k=len(labels))
+    assert _binary_ndcg(labels, scores, k=len(labels)) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("evaluator_kind", ["cross_encoder", "reciprocal_rank_fusion"])
+@pytest.mark.parametrize("dtype", [np.int8, np.uint8])
+@pytest.mark.parametrize("num_retrieved", [128, 256, 300])
+def test_evaluator_metrics_count_narrow_labels(evaluator_kind, dtype, num_retrieved):
+    from sklearn.metrics import average_precision_score, dcg_score
+
+    from sentence_transformers.cross_encoder.evaluation.reranking import CrossEncoderRerankingEvaluator
+    from sentence_transformers.sparse_encoder.evaluation.reciprocal_rank_fusion import ReciprocalRankFusionEvaluator
+
+    labels = np.array([1] * num_retrieved + [0] * 100, dtype=dtype)
+    scores = np.arange(len(labels), dtype=float)
+    num_positives = num_retrieved + 50
+    if evaluator_kind == "cross_encoder":
+        evaluator = CrossEncoderRerankingEvaluator(
+            [{"query": "q", "positive": ["p"], "negative": ["n"]}], at_k=len(labels), write_csv=False
+        )
+    else:
+        evaluator = ReciprocalRankFusionEvaluator([], [], at_k=len(labels), write_csv=False)
+    mrr, ndcg, ap = evaluator.compute_metrics(labels, scores, num_positives=num_positives)
+    ideal_dcg = sum(1 / log2(rank + 1) for rank in range(1, num_positives + 1))
+    assert mrr == pytest.approx(1 / 101)
+    assert ndcg == pytest.approx(dcg_score([labels], [scores]) / ideal_dcg)
+    assert ap == pytest.approx(average_precision_score(labels, scores) * num_retrieved / num_positives)

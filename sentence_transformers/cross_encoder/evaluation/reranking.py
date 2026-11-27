@@ -293,7 +293,7 @@ class CrossEncoderRerankingEvaluator(BaseEvaluator):
         return metrics
 
     def compute_metrics(self, y_true, y_pred, num_positives: int | None = None):
-        num_retrieved_positives = sum(y_true)
+        num_retrieved_positives = np.count_nonzero(y_true)
         if num_retrieved_positives == 0:
             return 0, 0, 0
         num_positives = max(num_positives or 0, num_retrieved_positives)
