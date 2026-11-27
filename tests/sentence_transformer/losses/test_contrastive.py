@@ -53,6 +53,18 @@ def test_contrastive_loss_does_not_warn_for_binary_labels() -> None:
     assert torch.isfinite(value)
 
 
+def test_contrastive_loss_preserves_numeric_label_precision() -> None:
+    loss = ContrastiveLoss(_EchoModel())
+    features = [{"sentence_embedding": torch.tensor([[1.0, 0.0]])}] * 2
+    labels = torch.tensor([1.0 - 2**-25], dtype=torch.float64)
+
+    with pytest.warns(UserWarning, match=CONTRASTIVE_WARNING):
+        value = loss(features, labels)
+
+    # Identical embeddings have distance 0: only (1 - label) * margin**2 / 2 contributes.
+    torch.testing.assert_close(value, torch.tensor(2**-28), rtol=0, atol=0)
+
+
 def test_contrastive_loss_only_checks_the_first_batch() -> None:
     # The label check runs once, on the first forward, to avoid a per-step device sync. Non-binary
     # labels that first appear in a later batch are therefore not flagged (labels are fixed per run).

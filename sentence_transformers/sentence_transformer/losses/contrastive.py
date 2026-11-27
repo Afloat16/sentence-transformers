@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from enum import Enum
 from typing import Any
 
+import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
@@ -109,6 +110,8 @@ class ContrastiveLoss(nn.Module):
                 f"but got {labels.numel()} labels with shape {tuple(labels.shape)}."
             )
         labels = labels.view(-1)
+        if labels.dtype == torch.bool:
+            labels = labels.float()
         if not self._checked_labels:
             self._checked_labels = True
             if labels.ne(0).logical_and(labels.ne(1)).any().item():

@@ -37,6 +37,7 @@ from sentence_transformers.sentence_transformer.losses import (
     BatchHardTripletLoss,
     BatchSemiHardTripletLoss,
     CachedMultipleNegativesRankingLoss,
+    ContrastiveLoss,
     CosineSimilarityLoss,
     MultipleNegativesRankingLoss,
     SoftmaxLoss,
@@ -53,6 +54,51 @@ if not is_training_available():
         reason='Sentence Transformers was not installed with the `["train"]` extra.',
         allow_module_level=True,
     )
+
+
+@pytest.mark.parametrize("labels", [[True, False], [1, 0], [1.0, 0.0]])
+def test_contrastive_training_with_binary_labels(word_embeddings_model, tmp_path, labels):
+    model = word_embeddings_model.to("cpu")
+    model[0].emb_layer.weight.requires_grad_(True)
+    initial_weights = model[0].emb_layer.weight.detach().clone()
+    trainer = SentenceTransformerTrainer(
+        model=model,
+        loss=ContrastiveLoss(model),
+        train_dataset=Dataset.from_dict(
+            {
+                "sentence1": ["hello world", "model text"],
+                "sentence2": ["sentence transformers", "model vector"],
+                "label": labels,
+            }
+        ),
+        args=SentenceTransformerTrainingArguments(
+            output_dir=str(tmp_path),
+            use_cpu=True,
+            max_steps=1,
+            per_device_train_batch_size=2,
+            learning_rate=1e-2,
+            save_strategy="no",
+            logging_strategy="no",
+            report_to=[],
+            disable_tqdm=True,
+            dataloader_pin_memory=False,
+        ),
+    )
+
+    embeddings = model.encode(
+        ["hello world", "sentence transformers", "model text", "model vector"],
+        convert_to_tensor=True,
+        show_progress_bar=False,
+    )
+    similarities = torch.nn.functional.cosine_similarity(embeddings[::2], embeddings[1::2])
+    expected_loss = ((1 - similarities[0]).square() + (similarities[1] - 0.5).clamp(min=0).square()) / 4
+
+    result = trainer.train()
+
+    assert result.global_step == 1
+    assert result.training_loss == pytest.approx(expected_loss.item())
+    assert not torch.equal(initial_weights, model[0].emb_layer.weight)
+    assert torch.isfinite(model[0].emb_layer.weight).all()
 
 
 def _train_triplet_ddp(rank, init_method, output_dir, loss_class, model):
