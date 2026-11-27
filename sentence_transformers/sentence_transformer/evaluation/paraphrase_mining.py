@@ -142,7 +142,7 @@ class ParaphraseMiningEvaluator(BaseEvaluator):
                 if (
                     key1 in sentences_map
                     and key2 in sentences_map
-                    and (self.duplicates[key1][key2] or self.duplicates[key2][key1])
+                    and (self.duplicates[key1][key2] or self.duplicates.get(key2, {}).get(key1, False))
                 ):
                     positive_key_pairs.add(tuple(sorted([key1, key2])))
 
@@ -191,7 +191,7 @@ class ParaphraseMiningEvaluator(BaseEvaluator):
 
             # Compute optimal threshold and F1-score
             n_extract += 1
-            if self.duplicates[id1][id2] or self.duplicates[id2][id1]:
+            if self.duplicates.get(id1, {}).get(id2, False) or self.duplicates.get(id2, {}).get(id1, False):
                 n_correct += 1
             if idx + 1 < len(pairs_list) and pairs_list[idx + 1][0] == score:
                 continue
