@@ -33,6 +33,9 @@ class MSEEvaluatorFromDataFrame(BaseEvaluator):
         write_csv (bool, optional): Whether to write the results to a CSV file. Defaults to True.
         truncate_dim (Optional[int], optional): The dimension to truncate sentence embeddings to. If None, uses the model's
             current truncation dimension. Defaults to None.
+
+    Raises:
+        ValueError: If no language combinations are supplied or a combination has no aligned non-empty sentences.
     """
 
     def __init__(
@@ -46,6 +49,8 @@ class MSEEvaluatorFromDataFrame(BaseEvaluator):
         truncate_dim: int | None = None,
     ):
         super().__init__()
+        if not combinations:
+            raise ValueError("MSEEvaluatorFromDataFrame needs at least one language combination.")
         self.combinations = combinations
         self.name = name
         self.batch_size = batch_size
@@ -71,6 +76,9 @@ class MSEEvaluatorFromDataFrame(BaseEvaluator):
                     all_source_sentences.add(row[src_lang])
                     src_sentences.append(row[src_lang])
                     trg_sentences.append(row[trg_lang])
+
+            if not src_sentences:
+                raise ValueError(f"Language pair {src_lang!r}-{trg_lang!r} has no aligned non-empty sentences.")
 
             self.data[(src_lang, trg_lang)] = (src_sentences, trg_sentences)
             self.csv_headers.append(f"{src_lang}-{trg_lang}")
