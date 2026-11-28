@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -204,7 +205,7 @@ class CrossEncoderTrainer(BaseTrainer):
         if model == self.model_wrapped and loss_fn.model != model:
             loss_fn = self.override_model_in_loss(loss_fn, model)
         try:
-            loss = loss_fn(features, labels, prompt=prompt, task=task)
+            inspect.signature(loss_fn.forward).bind(features, labels, prompt=prompt, task=task)
         except TypeError:
             loss = loss_fn(features, labels)
             logger.warning_once(
@@ -212,6 +213,8 @@ class CrossEncoderTrainer(BaseTrainer):
                 "These parameters are required for advanced preprocessing in losses. "
                 "Please update your loss function to accept `prompt` and `task` keyword arguments."
             )
+        else:
+            loss = loss_fn(features, labels, prompt=prompt, task=task)
         if isinstance(loss, dict):
             self.track_loss_components(loss)
             loss = torch.stack(list(loss.values())).sum()
