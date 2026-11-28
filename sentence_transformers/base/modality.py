@@ -411,10 +411,9 @@ class InputFormatter:
 
         _reconcile_video_metadata(typed_inputs, extra_modality_kwargs)
 
-        # Non-text pairs require conversion to message format. When the batch contains any
-        # non-text pairs, ALL items must be converted to messages for consistency. Text pairs
-        # (str, str) must also go through pair_to_messages so they get query/document roles.
-        if has_pairs:
+        # Mixed modalities and non-text pairs require a common message format. Preserve
+        # existing conversations and give text pairs their query/document roles.
+        if has_pairs or len({mod for mod, _ in typed_inputs}) > 1:
             messages = []
             for mod, value in typed_inputs:
                 if mod == "pair":
@@ -428,34 +427,21 @@ class InputFormatter:
                     messages.append(self.to_message(typed))
             return "message", {"message": messages}, extra_modality_kwargs
 
-        modalities, processed_inputs = zip(*typed_inputs)
-        processed_inputs = list(processed_inputs)
-        unique_modalities = set(modalities)
-
-        if len(unique_modalities) == 1:
-            modality = unique_modalities.pop()
-            if isinstance(modality, str):
-                processed_inputs = {modality: processed_inputs}
-            else:
-                ordered_keys = tuple(processed_inputs[0])
-                if (self.supported_modalities is None or "message" in self.supported_modalities) and any(
-                    tuple(entry) != ordered_keys for entry in processed_inputs[1:]
-                ):
-                    return (
-                        "message",
-                        {"message": [self.to_message(entry) for entry in processed_inputs]},
-                        extra_modality_kwargs,
-                    )
-                processed_inputs = {mod: [entry[mod] for entry in processed_inputs] for mod in ordered_keys}
+        modality = typed_inputs[0][0]
+        processed_inputs = [value for _, value in typed_inputs]
+        if isinstance(modality, str):
+            processed_inputs = {modality: processed_inputs}
         else:
-            logger.debug(f"Mixed modalities detected: {unique_modalities}. Converting to 'message' format.")
-            processed_inputs = {
-                "message": [
-                    self.to_message(value if isinstance(modality, tuple) else {modality: value})  # type: ignore[arg-type]
-                    for modality, value in typed_inputs
-                ]
-            }
-            modality = "message"
+            ordered_keys = tuple(processed_inputs[0])
+            if (self.supported_modalities is None or "message" in self.supported_modalities) and any(
+                tuple(entry) != ordered_keys for entry in processed_inputs[1:]
+            ):
+                return (
+                    "message",
+                    {"message": [self.to_message(entry) for entry in processed_inputs]},
+                    extra_modality_kwargs,
+                )
+            processed_inputs = {mod: [entry[mod] for entry in processed_inputs] for mod in ordered_keys}
 
         return modality, processed_inputs, extra_modality_kwargs
 
