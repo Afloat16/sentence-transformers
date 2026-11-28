@@ -1473,6 +1473,19 @@ class Transformer(InputModule):
             self._verify_left_padding(processor_output, modality_kwargs, common_kwargs)
             processor_output["logits_to_keep"] = logits_to_keep
 
+            # Unlike generate(), a direct causal forward does not derive positions from the mask.
+            # Learned absolute positions would otherwise shift with each batch's left padding.
+            attention_mask = processor_output.get("attention_mask")
+            if (
+                self.transformer_task == "text-generation"
+                and "position_ids" in self._declared_forward_params
+                and "position_ids" not in processor_output
+                and isinstance(attention_mask, torch.Tensor)
+                and attention_mask.ndim == 2
+            ):
+                position_ids = attention_mask.long().cumsum(-1) - 1
+                processor_output["position_ids"] = position_ids.masked_fill(attention_mask == 0, 0)
+
         # ColBERT-style query expansion: swap pad positions within the width floor for the expansion
         # token id, and mark them via ``query_expansion_positions`` so downstream modules score them.
         expansion = self.query_expansion if task == "query" else None
