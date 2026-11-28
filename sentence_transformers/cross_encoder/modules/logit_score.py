@@ -46,7 +46,8 @@ class LogitScore(Module):
         logits = features[self.module_input_name][:, -1]
 
         if self.false_token_id is None:
-            scores = logits[:, self.true_token_id]
+            # Scores are collected across batches; a view would retain the full vocabulary logits.
+            scores = logits[:, self.true_token_id].clone()
         else:
             scores = logits[:, self.true_token_id] - logits[:, self.false_token_id]
 
