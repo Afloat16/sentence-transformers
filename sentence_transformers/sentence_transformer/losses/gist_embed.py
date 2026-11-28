@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from typing import Any, Literal
 
 import torch
@@ -11,6 +12,20 @@ from sentence_transformers.base.losses.merged_forward import embed_columns
 from sentence_transformers.sentence_transformer.model import SentenceTransformer
 from sentence_transformers.sentence_transformer.modules import StaticEmbedding
 from sentence_transformers.util import all_gather_with_grad, batch_to_device, get_rank
+
+
+@contextmanager
+def _guide_eval_mode(guide: nn.Module) -> Iterator[None]:
+    """Disable training-only layers for guide scoring, then restore every module's mode."""
+    training_modes = {module: module.training for module in guide.modules()}
+    try:
+        guide.eval()
+        yield
+    finally:
+        # The guide can share modules with the student, including being the same model.
+        # A recursive train() here would lose intentionally mixed train/eval states.
+        for module, training in training_modes.items():
+            module.training = training
 
 
 class GISTEmbedLoss(nn.Module):
@@ -39,7 +54,8 @@ class GISTEmbedLoss(nn.Module):
 
         Args:
             model: SentenceTransformer model based on a `transformers` model.
-            guide: SentenceTransformer model to guide the in-batch negative sample selection.
+            guide: SentenceTransformer model to guide the in-batch negative sample selection. It runs
+                in evaluation mode for guide scoring; its surrounding training mode is preserved.
                 Its parameters are frozen unless shared with ``model``.
             temperature: Temperature parameter to scale the cosine similarities. Inverse of the ``scale`` parameter
                 in :class:`MultipleNegativesRankingLoss`.
@@ -150,7 +166,7 @@ class GISTEmbedLoss(nn.Module):
         # loss decorators like MatryoshkaLoss reuse the dicts the model filled.
         guide_features = [dict(sentence_feature) for sentence_feature in sentence_features]
         embeddings = embed_columns(self.model, sentence_features)
-        with torch.no_grad():
+        with torch.no_grad(), _guide_eval_mode(self.guide):
             if self.must_retokenize:
                 guide_features = []
                 for sentence_feature in sentence_features:

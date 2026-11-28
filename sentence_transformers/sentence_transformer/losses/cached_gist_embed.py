@@ -21,6 +21,8 @@ from sentence_transformers.base.losses.gradcache import (
 from sentence_transformers.sentence_transformer.model import SentenceTransformer
 from sentence_transformers.util import all_gather_with_grad, batch_to_device, get_rank
 
+from .gist_embed import _guide_eval_mode
+
 
 class CachedGISTEmbedLoss(nn.Module):
     # Back-propagates from a hook on the returned loss (see `gradcache.uses_gradient_cache`).
@@ -60,7 +62,8 @@ class CachedGISTEmbedLoss(nn.Module):
 
         Args:
             model: SentenceTransformer model
-            guide: SentenceTransformer model to guide the in-batch negative sample selection.
+            guide: SentenceTransformer model to guide the in-batch negative sample selection. It runs
+                in evaluation mode for guide scoring; its surrounding training mode is preserved.
                 Its parameters are frozen unless shared with ``model``.
             temperature: Temperature parameter to scale the cosine similarities.
             mini_batch_size: Mini-batch size for the forward pass, this denotes how much memory is actually used during
@@ -204,7 +207,7 @@ class CachedGISTEmbedLoss(nn.Module):
                 # model's embeddings: the guide's were already used to compute the cached gradients.
                 guide_reps = None
             else:
-                with torch.no_grad():
+                with torch.no_grad(), _guide_eval_mode(self.guide):
                     if self.must_retokenize:
                         input_ids = sentence_feature_minibatch["input_ids"]
                         if "cu_seq_lens_q" in sentence_feature_minibatch:

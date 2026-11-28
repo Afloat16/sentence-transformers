@@ -9,6 +9,15 @@ import sentence_transformers.sentence_transformer.losses.gist_embed as ge
 from sentence_transformers.sentence_transformer.losses import CachedGISTEmbedLoss, GISTEmbedLoss
 
 
+class _EmbeddingInput(torch.nn.Module):
+    def __init__(self, key="sentence_embedding"):
+        super().__init__()
+        self.key = key
+
+    def forward(self, features):
+        return {"sentence_embedding": features[self.key]}
+
+
 def _make_loss(margin: float) -> GISTEmbedLoss:
     """Build a GISTEmbedLoss without loading real models.
 
@@ -27,7 +36,7 @@ def _make_loss(margin: float) -> GISTEmbedLoss:
     obj.must_retokenize = False
     obj.cross_entropy_loss = torch.nn.CrossEntropyLoss()
 
-    fake = lambda sentence_feature: {"sentence_embedding": sentence_feature["sentence_embedding"]}
+    fake = _EmbeddingInput()
     obj.model = fake
     obj.guide = fake
     return obj
@@ -121,7 +130,7 @@ def test_gather_rank1_matches_global_batch(simulate_rank1_world2, identical_pair
         features[1] = {key: value.clone() for key, value in features[0].items()}
     global_features = [{key: ge.all_gather_with_grad(value) for key, value in feature.items()} for feature in features]
     loss_fn = _make_loss(margin=0.0)
-    loss_fn.guide = lambda feature: {"sentence_embedding": feature["guide_embedding"]}
+    loss_fn.guide = _EmbeddingInput("guide_embedding")
     loss_fn.temperature = 1.0
     loss_fn.cross_entropy_loss = torch.nn.CrossEntropyLoss(reduction="none")
 
@@ -146,7 +155,7 @@ def _make_relative_loss(margin: float) -> GISTEmbedLoss:
     obj.must_retokenize = False
     obj.cross_entropy_loss = torch.nn.CrossEntropyLoss()
 
-    fake = lambda sentence_feature: {"sentence_embedding": sentence_feature["sentence_embedding"]}
+    fake = _EmbeddingInput()
     obj.model = fake
     obj.guide = fake
     return obj
