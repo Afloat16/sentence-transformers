@@ -873,9 +873,10 @@ class BaseTrainer(Trainer, ABC):
         """
         data_collator = self.data_collator
 
+        seed = self.args.data_seed if self.args.data_seed is not None else self.args.seed
         generator = torch.Generator()
-        if self.args.seed is not None:
-            generator.manual_seed(self.args.seed)
+        if seed is not None:
+            generator.manual_seed(seed)
 
         dataloader_params = {
             "collate_fn": data_collator,
@@ -914,7 +915,7 @@ class BaseTrainer(Trainer, ABC):
                     drop_last=self.args.dataloader_drop_last,
                     valid_label_columns=data_collator.valid_label_columns,
                     generator=generator,
-                    seed=self.args.seed,
+                    seed=seed,
                 )
                 for sub_dataset in dataset.values()
             ]
@@ -924,7 +925,7 @@ class BaseTrainer(Trainer, ABC):
                 dataset=dataset,
                 batch_samplers=batch_samplers,
                 generator=generator,
-                seed=self.args.seed,
+                seed=seed,
             )
             dataloader_params["batch_sampler"] = batch_sampler
 
@@ -935,7 +936,7 @@ class BaseTrainer(Trainer, ABC):
                 drop_last=self.args.dataloader_drop_last,
                 valid_label_columns=data_collator.valid_label_columns,
                 generator=generator,
-                seed=self.args.seed,
+                seed=seed,
             )
             dataloader_params["batch_sampler"] = batch_sampler
         else:
