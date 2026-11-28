@@ -115,6 +115,9 @@ class SparseStaticEmbedding(InputModule):
         """
         Create an SparseStaticEmbedding module from a JSON file containing token to IDF weight mappings.
 
+        Only tokens present in the tokenizer vocabulary are assigned weights. Other vocabulary
+        entries keep a zero weight; JSON tokens outside the vocabulary are ignored.
+
         Args:
             json_path (str): Path to the JSON file containing token to IDF weight mappings.
             tokenizer (PreTrainedTokenizer): Tokenizer to use for converting tokens to IDs.
@@ -143,13 +146,11 @@ class SparseStaticEmbedding(InputModule):
         with open(json_path, encoding="utf-8") as fIn:
             idf = json.load(fIn)
 
-        tokens, weights = zip(*idf.items())
-        token_ids = tokenizer.convert_tokens_to_ids(list(tokens))
-        weights = torch.tensor(weights, dtype=torch.float32)
-
-        weight = torch.zeros(len(tokenizer.get_vocab()), dtype=torch.float32)
-        for token_id, w in zip(token_ids, weights):
-            weight[token_id] = w
+        vocabulary = tokenizer.get_vocab()
+        weight = torch.zeros(len(vocabulary), dtype=torch.float32)
+        for token, value in idf.items():
+            if token in vocabulary:
+                weight[vocabulary[token]] = value
 
         return cls(weight=weight, tokenizer=tokenizer, **config)
 
