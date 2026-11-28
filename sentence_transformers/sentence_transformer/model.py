@@ -1145,15 +1145,14 @@ class SentenceTransformer(BaseModel, FitMixin):
 
     def set_pooling_include_prompt(self, include_prompt: bool) -> None:
         """
-        Sets the `include_prompt` attribute in the pooling layer in the model, if there is one.
+        Sets the `include_prompt` attribute in all pooling layers, including those within Router routes.
 
         This is useful for INSTRUCTOR models, as the prompt should be excluded from the pooling strategy
         for these models.
         """
-        for module in self:
+        for module in self.modules():
             if isinstance(module, Pooling):
                 module.include_prompt = include_prompt
-                break
 
     @deprecated("The `get_sentence_features` method is deprecated and will be removed in a future version.")
     def get_sentence_features(self, *features) -> dict[str, Tensor]:

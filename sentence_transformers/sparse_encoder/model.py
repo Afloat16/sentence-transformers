@@ -880,15 +880,14 @@ class SparseEncoder(BaseModel):
 
     def set_pooling_include_prompt(self, include_prompt: bool) -> None:
         """
-        Sets the ``include_prompt`` attribute in the pooling layer in the model, if there is one.
+        Sets the ``include_prompt`` attribute in all pooling layers, including those within Router routes.
 
         This is useful for models where the prompt should be excluded from the pooling strategy,
         e.g. CSR models with a :class:`~sentence_transformers.sentence_transformer.modules.Pooling` layer.
         """
-        for module in self:
+        for module in self.modules():
             if isinstance(module, Pooling):
                 module.include_prompt = include_prompt
-                break
 
     def similarity(
         self,
